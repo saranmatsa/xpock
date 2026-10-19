@@ -107,13 +107,14 @@ class CarrierArchitectureValidator:
         self,
         channel_dict: Dict[str, Any],
     ) -> ValidationResult:
-        """Validate a carrier channel model dict against the carrier contract."""
+        """Validate a carrier channel model against the carrier contract."""
         result = ValidationResult(
             check_name="carrier_architecture.channel_model",
             passed=True,
         )
 
         # Check that no conventional networking references appear
+        # Use word-boundary matching to avoid false positives (e.g., "ip" in "multipath")
         conventional_terms = [
             "tcp", "udp", "ip", "quic", "http", "dns", "mdns",
             "websocket", "webrtc", "libp2p", "wifi", "bluetooth",
@@ -123,13 +124,15 @@ class CarrierArchitectureValidator:
         medium = channel_dict.get("medium", "").lower()
         notes = " ".join(channel_dict.get("medium_notes", [])).lower()
 
+        import re
         for term in conventional_terms:
-            if term in medium or term in notes:
+            pattern = r"\b" + re.escape(term) + r"\b"
+            if re.search(pattern, medium) or re.search(pattern, notes):
                 result.add_issue(
                     ValidationLevel.CRITICAL,
                     "CARR-VIOLATION",
                     f"Conventional networking term '{term}' found in carrier model",
-                    details=f"medium={medium}, notes contains '{term}'",
+                    details=f"medium={medium}, notes={notes[:100]}",
                     remediation="Remove conventional networking references; carrier must be technology-agnostic",
                 )
 
@@ -417,7 +420,7 @@ class HX241ValidatorSuite:
 
     def generate_report(
         self,
-        validation_results: Dict[str, List[ValidationResult]],
+        validation_results: Dict[str, Any],
     ) -> Dict[str, Any]:
         """Generate a validation report from results."""
         total_checks = 0
@@ -430,8 +433,14 @@ class HX241ValidatorSuite:
 
         all_issues: List[ValidationIssue] = []
 
-        for category, results in validation_results.items():
-            for r in results:
+        for category, category_results in validation_results.items():
+            # Normalize to list of ValidationResult
+            if isinstance(category_results, ValidationResult):
+                category_results = [category_results]
+            elif not isinstance(category_results, list):
+                category_results = [category_results]
+
+            for r in category_results:
                 total_checks += 1
                 if r.passed:
                     passed_checks += 1
@@ -463,11 +472,11 @@ class HX241ValidatorSuite:
             "issues": [i.to_dict() for i in all_issues],
             "by_category": {
                 cat: {
-                    "total": len(results),
-                    "passed": sum(1 for r in results if r.passed),
-                    "failed": sum(1 for r in results if not r.passed),
+                    "total": len(cr) if isinstance(cr, list) else 1,
+                    "passed": sum(1 for r in (cr if isinstance(cr, list) else [cr]) if r.passed),
+                    "failed": sum(1 for r in (cr if isinstance(cr, list) else [cr]) if not r.passed),
                 }
-                for cat, results in validation_results.items()
+                for cat, cr in validation_results.items()
             },
         }
 

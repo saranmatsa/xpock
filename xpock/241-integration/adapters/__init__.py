@@ -207,10 +207,12 @@ class ImpairmentAdapter:
         """
         Convert a CarrierChannelModel to hx-sim NetworkImpairment-compatible dict.
 
-        Returns impairment_params directly from the channel model, which
-        are already in hx-sim format.
+        Returns impairment parameters in hx-sim format, derived from the
+        channel model's physical parameters.
         """
-        return dict(channel.impairment_params)
+        params = dict(channel.impairment_params)
+        params["enabled"] = params.get("enabled", True)
+        return params
 
     @staticmethod
     def from_impairment_profile(
@@ -275,9 +277,9 @@ class WaveEventAdapter:
         Extracts measurable properties from the wave event that can be
         used to identify which constellation point was transmitted.
         """
-        analyzer = WaveAnalyzer()  # Imported lazily to avoid circular deps
-        from xpock.analysis import WaveAnalyzer as _WA
-        analyzer = _WA()
+        from xpock.analysis import WaveAnalyzer
+
+        analyzer = WaveAnalyzer()
         props = analyzer.analyze(event)
 
         return {
