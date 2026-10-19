@@ -1,0 +1,133 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CarrierChannelModel",
+  "description": "HX-241 carrier channel model output from XPOCK's physical wave propagation models. Describes how a wave propagates through a specific physical carrier medium. These are physical layer models only; HX-241 protocol logic is carrier-agnostic.",
+  "type": "object",
+  "required": [
+    "medium",
+    "frequency_hz",
+    "wavelength_m",
+    "distance_m",
+    "transmit_power_w",
+    "path_loss_db",
+    "snr_db",
+    "delay_spread_s",
+    "coherence_bandwidth_hz",
+    "doppler_spread_hz",
+    "capacity_bps",
+    "impairment_params",
+    "medium_notes"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Unique identifier for this carrier model"
+    },
+    "medium": {
+      "type": "string",
+      "enum": [
+        "free_space_optical",
+        "radio_frequency",
+        "acoustic",
+        "optical_fiber",
+        "magnetic_induction",
+        "pressure_wave",
+        "custom"
+      ],
+      "description": "Type of physical carrier medium"
+    },
+    "frequency_hz": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Carrier frequency in Hz"
+    },
+    "wavelength_m": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Wavelength in meters"
+    },
+    "distance_m": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Propagation distance in meters"
+    },
+    "transmit_power_w": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Transmit power in watts"
+    },
+    "path_loss_db": {
+      "type": "number",
+      "description": "Total path loss in dB"
+    },
+    "snr_db": {
+      "type": "number",
+      "description": "Signal-to-noise ratio in dB"
+    },
+    "delay_spread_s": {
+      "type": "number",
+      "minimum": 0,
+      "description": "RMS delay spread in seconds (multipath)"
+    },
+    "coherence_bandwidth_hz": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Coherence bandwidth in Hz"
+    },
+    "doppler_spread_hz": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Doppler spread in Hz (mobility-induced)"
+    },
+    "capacity_bps": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Channel capacity in bits per second"
+    },
+    "impairment_params": {
+      "$ref": "network_impairment_params.json",
+      "description": "hx-sim compatible impairment parameters derived from this channel model"
+    },
+    "medium_notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Medium-specific observations"
+    },
+    "frequency_response": {
+      "type": "array",
+      "items": {
+        "type": "number"
+      },
+      "description": "Complex channel transfer function H(f) - real and imaginary parts interleaved"
+    },
+    "frequency_grid_hz": {
+      "type": "array",
+      "items": {
+        "type": "number"
+      },
+      "description": "Frequency grid in Hz for the frequency response"
+    },
+    "impulse_response": {
+      "type": "array",
+      "items": {
+        "type": "number"
+      },
+      "description": "Channel impulse response h(t) - real and imaginary parts interleaved"
+    },
+    "time_grid_s": {
+      "type": "array",
+      "items": {
+        "type": "number"
+      },
+      "description": "Time grid in seconds for the impulse response"
+    }
+  },
+  "additionalProperties": false,
+  "hx241_mapping": {
+    "rust_type": "Physical carrier model (not part of HX-241 core protocol)",
+    "purpose": "Estimate CarrierCapabilities and NetworkImpairment parameters for hx-sim",
+    "invariant": "I-CARR-001 to I-CARR-005: HX-241 does not depend on specific carrier technology"
+  }
+}

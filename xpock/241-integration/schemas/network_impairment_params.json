@@ -1,0 +1,97 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "NetworkImpairmentParams",
+  "description": "HX-241 hx-sim NetworkImpairment-compatible parameters. These are derived from XPOCK's physically-based carrier channel models. The values are starting points for hx-sim's ImpairmentEngine and should be calibrated against real carrier measurements.",
+  "type": "object",
+  "required": [
+    "packet_loss_rate",
+    "corruption_rate",
+    "base_latency_us",
+    "jitter_us",
+    "bandwidth_bps",
+    "enabled"
+  ],
+  "properties": {
+    "packet_loss_rate": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "description": "Packet loss rate (0.0-1.0). Derived from path loss: higher loss = higher rate."
+    },
+    "duplication_rate": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "description": "Packet duplication rate (0.0-1.0). Typically 0.0 for most carriers."
+    },
+    "reordering_depth": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Maximum reordering depth (0 = no reordering)"
+    },
+    "corruption_rate": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "description": "Packet corruption rate (0.0-1.0). Derived from SNR: lower SNR = higher corruption."
+    },
+    "base_latency_us": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Base propagation latency in microseconds (distance / propagation speed)"
+    },
+    "jitter_us": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Additional random latency in microseconds (0 to jitter_us). Derived from delay spread and Doppler."
+    },
+    "bandwidth_bps": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Bandwidth limit in bytes/sec (0 = unlimited). Derived from coherence bandwidth."
+    },
+    "enabled": {
+      "type": "boolean",
+      "description": "Whether this impairment profile is enabled"
+    },
+    "partition": {
+      "type": ["object", "null"],
+      "description": "Network partition configuration (null = no partition)"
+    },
+    "source": {
+      "type": "string",
+      "description": "Source of these parameters (e.g., 'xpock_impairment_modeler')"
+    },
+    "medium": {
+      "type": "string",
+      "description": "Carrier medium name"
+    },
+    "path_loss_db": {
+      "type": "number",
+      "description": "Path loss in dB (diagnostic, not used by hx-sim directly)"
+    },
+    "snr_db": {
+      "type": "number",
+      "description": "Signal-to-noise ratio in dB (diagnostic)"
+    },
+    "delay_spread_s": {
+      "type": "number",
+      "description": "RMS delay spread in seconds (diagnostic)"
+    },
+    "coherence_bandwidth_hz": {
+      "type": "number",
+      "description": "Coherence bandwidth in Hz (diagnostic)"
+    },
+    "doppler_spread_hz": {
+      "type": "number",
+      "description": "Doppler spread in Hz (diagnostic)"
+    }
+  },
+  "additionalProperties": true,
+  "hx241_mapping": {
+    "rust_type": "hx_sim::impairment::NetworkImpairment",
+    "rust_location": "hx-sim/src/impairment.rs",
+    "usage": "Pass to hx_sim::impairment::ImpairmentEngine::set_config()",
+    "invariant": "All rate fields must be in [0.0, 1.0]; bandwidth_bps of 0 means unlimited"
+  }
+}

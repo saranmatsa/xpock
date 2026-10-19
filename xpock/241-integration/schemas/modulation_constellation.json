@@ -1,0 +1,96 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ModulationConstellation",
+  "description": "Wave-structure modulation constellation for HX-241. Maps bit patterns to combinations of independently controllable wave properties. This is ONE possible modulation approach within HX-241's carrier-agnostic framework, not a requirement.",
+  "type": "object",
+  "required": [
+    "scheme_name",
+    "capacity_bits",
+    "num_states",
+    "enabled_dimensions",
+    "constellation"
+  ],
+  "properties": {
+    "scheme_name": {
+      "type": "string",
+      "description": "Name of the modulation scheme"
+    },
+    "capacity_bits": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Total bits encodable per wave symbol (sum of log2(states) per dimension)"
+    },
+    "num_states": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Total number of distinguishable wave structures (product of states across dimensions)"
+    },
+    "enabled_dimensions": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "temporal_shape",
+          "temporal_duration",
+          "temporal_chirp_rate",
+          "carrier_frequency",
+          "spatial_mode",
+          "oam_charge",
+          "polarization_state",
+          "polarization_angle",
+          "beam_waist",
+          "coherence_type",
+          "topological_charge"
+        ]
+      },
+      "description": "List of modulation dimensions used in this scheme"
+    },
+    "constellation": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["index", "bit_assignment", "dimension_assignments"],
+        "properties": {
+          "index": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Constellation point index"
+          },
+          "bit_assignment": {
+            "type": "string",
+            "description": "Bit pattern assigned to this constellation point"
+          },
+          "dimension_assignments": {
+            "type": "object",
+            "description": "Mapping from dimension name to state value for this point"
+          },
+          "field_shape": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            },
+            "description": "Shape of the generated wave field"
+          },
+          "total_power": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Total power of the generated wave field"
+          },
+          "duration": {
+            "type": ["number", "null"],
+            "description": "Temporal duration of the wave field"
+          }
+        },
+        "additionalProperties": false
+      },
+      "description": "All constellation points with their bit assignments and dimension mappings"
+    }
+  },
+  "additionalProperties": false,
+  "hx241_mapping": {
+    "rust_type": "User-defined modulation layer (not part of HX-241 core protocol)",
+    "rust_location": "Application layer or optional transport extension",
+    "status": "Optional - HX-241 does not mandate any specific modulation",
+    "note": "Conventional QAM/OFDM/modulation can be added as alternative implementations"
+  }
+}

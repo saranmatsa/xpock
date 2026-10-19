@@ -1,0 +1,75 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CarrierCapabilities",
+  "description": "HX-241 CarrierCapabilities as defined in CARRIER-CONTRACT.md. These are hints only; the protocol operates correctly with defaults. This schema defines the portable interchange format for carrier capability estimates produced by XPOCK's physical wave models.",
+  "type": "object",
+  "required": [
+    "max_mtu",
+    "typical_mtu",
+    "max_bandwidth_bps",
+    "typical_latency_us",
+    "reliability",
+    "supports_broadcast",
+    "supports_multicast",
+    "supports_mobility",
+    "energy_cost_nj_per_bit",
+    "max_range_m"
+  ],
+  "properties": {
+    "max_mtu": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Maximum transmission unit in bytes"
+    },
+    "typical_mtu": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Typical MTU for path selection in bytes"
+    },
+    "max_bandwidth_bps": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Maximum bandwidth in bits per second"
+    },
+    "typical_latency_us": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Typical latency in microseconds"
+    },
+    "reliability": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100,
+      "description": "Reliability score 0-100"
+    },
+    "supports_broadcast": {
+      "type": "boolean",
+      "description": "Whether the carrier supports broadcast"
+    },
+    "supports_multicast": {
+      "type": "boolean",
+      "description": "Whether the carrier supports multicast"
+    },
+    "supports_mobility": {
+      "type": "boolean",
+      "description": "Whether the carrier supports mobile nodes"
+    },
+    "energy_cost_nj_per_bit": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Energy cost in nanojoules per bit"
+    },
+    "max_range_m": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Maximum range in meters"
+    }
+  },
+  "additionalProperties": false,
+  "hx241_mapping": {
+    "rust_type": "hx_transport::carrier_types::CarrierCapabilities",
+    "rust_location": "hx-transport/src/carrier_types.rs",
+    "contract": "CARRIER-CONTRACT.md Section 3.3",
+    "invariant": "I-CARR-005: Capabilities are HINTS only; protocol operates with defaults"
+  }
+}

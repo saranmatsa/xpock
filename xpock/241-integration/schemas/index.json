@@ -1,0 +1,52 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "XPOCK HX-241 Integration Schemas Index",
+  "description": "Index of all JSON schemas in the 241-integration module. These schemas define portable, language-agnostic data formats that map XPOCK's computational outputs to HX-241's Rust types and interfaces.",
+  "type": "object",
+  "properties": {
+    "schemas": {
+      "type": "object",
+      "properties": {
+        "carrier_capabilities": {
+          "description": "CarrierCapabilities - maps to hx_transport::carrier_types::CarrierCapabilities",
+          "file": "carrier_capabilities.json"
+        },
+        "network_impairment_params": {
+          "description": "NetworkImpairmentParams - maps to hx_sim::impairment::NetworkImpairment",
+          "file": "network_impairment_params.json"
+        },
+        "capacity_analysis_result": {
+          "description": "CapacityAnalysisResult - for hx-sim benchmark configuration and session dimensioning",
+          "file": "capacity_analysis_result.json"
+        },
+        "modulation_constellation": {
+          "description": "ModulationConstellation - optional wave-structure modulation layer",
+          "file": "modulation_constellation.json"
+        },
+        "carrier_channel_model": {
+          "description": "CarrierChannelModel - physical wave propagation model output",
+          "file": "carrier_channel_model.json"
+        }
+      }
+    },
+    "hx241_integration_points": {
+      "carrier_capabilities": "hx-transport/src/carrier_types.rs - CarrierCapabilities struct",
+      "network_impairment_params": "hx-sim/src/impairment.rs - NetworkImpairment struct",
+      "capacity_analysis_result": "hx-sim/src/benchmark.rs - BenchmarkConfig and session dimensioning",
+      "modulation_constellation": "Application layer - optional modulation extension",
+      "carrier_channel_model": "Physical layer simulation - not part of HX-241 core"
+    },
+    "architectural_compliance": {
+      "no_conventional_stack": "No IP/TCP/UDP/QUIC/DNS/HTTP dependencies in any schema",
+      "carrier_agnostic": "HX-241 protocol logic is not modified or dependent on these schemas",
+      "capabilities_are_hints": "I-CARR-005: All carrier capabilities are HINTS only"
+    },
+    "usage": {
+      "step1": "XPOCK generates carrier channel models from physical parameters",
+      "step2": "Channel models are converted to CarrierCapabilities and NetworkImpairment params",
+      "step3": "JSON test vectors are consumed by hx-sim's ImpairmentEngine and benchmark suite",
+      "step4": "Rust implementations deserialize JSON with serde and map to native types"
+    }
+  },
+  "additionalProperties": false
+}

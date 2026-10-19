@@ -1,0 +1,93 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CapacityAnalysisResult",
+  "description": "HX-241 channel capacity analysis results. Computes Shannon capacity, spectral efficiency, and distinguishable wave state counts from XPOCK's wave structure analysis and ENGINES' information theory engine.",
+  "type": "object",
+  "required": [
+    "snr_db",
+    "bandwidth_hz",
+    "shannon_capacity_bps",
+    "spectral_efficiency_bps_hz",
+    "usable_capacity_bps",
+    "distinguishable_states",
+    "bits_per_symbol",
+    "symbols_per_second",
+    "net_information_rate_bps"
+  ],
+  "properties": {
+    "config_name": {
+      "type": "string",
+      "description": "Name of the analyzed configuration"
+    },
+    "snr_db": {
+      "type": "number",
+      "description": "Signal-to-noise ratio in dB"
+    },
+    "bandwidth_hz": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Channel bandwidth in Hz"
+    },
+    "shannon_capacity_bps": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Shannon channel capacity C = B * log2(1 + SNR) in bits per second"
+    },
+    "spectral_efficiency_bps_hz": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Spectral efficiency in bits per second per Hz"
+    },
+    "usable_capacity_bps": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Usable capacity after forward error correction overhead"
+    },
+    "distinguishable_states": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Number of distinguishable wave states (from JS divergence analysis)"
+    },
+    "bits_per_symbol": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Bits encodable per wave symbol: log2(distinguishable_states)"
+    },
+    "symbols_per_second": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Symbol rate (baud) estimate, typically equal to bandwidth for passband"
+    },
+    "net_information_rate_bps": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Net information rate after all overheads"
+    },
+    "min_js_divergence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Minimum Jensen-Shannon divergence between any pair of wave states"
+    },
+    "avg_js_divergence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Average Jensen-Shannon divergence between wave state pairs"
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Human-readable observations from the analysis"
+    }
+  },
+  "additionalProperties": false,
+  "hx241_mapping": {
+    "rust_type": "Used for hx-sim benchmark configuration and session dimensioning",
+    "rust_location": "hx-sim/src/benchmark.rs",
+    "purpose": "Dimension HX-241 sessions, flow control windows, and congestion control parameters",
+    "invariant": "Capacity estimates are mathematical models; actual achievable rates depend on implementation"
+  }
+}
