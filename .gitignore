@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.png
+*.jpg
+*.jpeg
+*.png
+.xpock_output/
+.build/
+.eggs/
+*.egg-info/
+dist/
+build/
+.ipynb_checkpoints
+.DS_Store
+Thumbs.db
