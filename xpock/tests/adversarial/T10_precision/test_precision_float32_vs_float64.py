@@ -14,6 +14,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 import numpy as np
+import pytest
 
 
 def _load_module(name, path):
