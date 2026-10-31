@@ -15,11 +15,20 @@ from typing import Any, Dict, List
 import numpy as np
 import pytest
 
-turbulence_mod = _load_module_safe(
+
+def _load_module(name: str, path: str):
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+turbulence_mod = _load_module(
     'xpock.wave_info.turbulence_t1_adv',
     'src/xpock/wave_info/turbulence.py',
 )
-skyrmion_modem_mod = _load_module_safe(
+skyrmion_modem_mod = _load_module(
     'xpock.wave_info.skyrmion_modem_t1_adv',
     'src/xpock/wave_info/skyrmion_modem.py',
 )
@@ -28,14 +37,6 @@ TurbulenceConfig = turbulence_mod.TurbulenceConfig
 TurbulenceModel = turbulence_mod.TurbulenceModel
 ModemConfig = skyrmion_modem_mod.ModemConfig
 SkyrmionModem = skyrmion_modem_mod.SkyrmionModem
-
-
-def _load_module_safe(name: str, path: str):
-    spec = importlib.util.spec_from_file_location(name, path)
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[name] = mod
-    spec.loader.exec_module(mod)
-    return mod
 
 
 class T1ParameterGenerator:
