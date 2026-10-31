@@ -68,9 +68,9 @@ def test_precision_float32_vs_float64():
     bits_tx = np.array([1])
     Ex_tx, Ey_tx, n_tx = modem.modulate(bits_tx, X, Y)
 
-    # Cast to float32 to test precision sensitivity
-    Ex_tx_f32 = Ex_tx.astype(np.float32).astype(np.complex64)
-    Ey_tx_f32 = Ey_tx.astype(np.float32).astype(np.complex64)
+    # Cast to float32 precision (preserve real and imaginary parts separately)
+    Ex_tx_f32 = Ex_tx.real.astype(np.float32) + 1j * Ex_tx.imag.astype(np.float32)
+    Ey_tx_f32 = Ey_tx.real.astype(np.float32) + 1j * Ey_tx.imag.astype(np.float32)
 
     # Demodulate at float32 precision
     q_measured, n_rx = modem.demodulate(Ex_tx_f32, Ey_tx_f32)
