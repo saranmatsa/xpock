@@ -140,13 +140,13 @@ def test_t15_combination(t15_config):
 
     if noise_level > 0.0:
         rng = np.random.default_rng(stress_cfg['seed'] + 20)
-        noise = rng.normal(0, noise_level, Ex_rx.shape) + 1j * rng.normal(
-            0, noise_level, Ex_rx.shape
+        noise = rng.normal(0, noise_level, E_rx.shape) + 1j * rng.normal(
+            0, noise_level, E_rx.shape
         )
-        Ex_rx = Ex_rx + noise
+        E_rx = E_rx + noise
         E_rx_y = E_rx_y + noise
 
-    q_measured, n_rx = modem.demodulate(Ex_rx, E_rx_y)
+    q_measured, n_rx = modem.demodulate(E_rx, E_rx_y)
 
     assert np.isfinite(q_measured)
     assert isinstance(n_rx, (int, np.integer))
