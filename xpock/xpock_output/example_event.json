@@ -1,0 +1,47 @@
+{
+  "event_id": "90c53f70-a28a-4965-9bc7-c05c3cb8ff24",
+  "timestamp": "2026-10-19T08:06:17.411546+00:00",
+  "parameters": {
+    "temporal_shape": "gaussian",
+    "temporal_amplitude": 1.0,
+    "temporal_duration": 1.0,
+    "temporal_chirp_rate": 0.0,
+    "temporal_carrier_freq": 0.0,
+    "spatial_mode": "laguerre_gaussian",
+    "spatial_p": 0,
+    "spatial_l": 1,
+    "spatial_waist": 1.0,
+    "spatial_wavelength": 1.0,
+    "spatial_position": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "polarization_state": "linear",
+    "polarization_angle": 0.0,
+    "topology_charge_type": "winding",
+    "topology_charge": 1,
+    "topology_core_radius": 0.1,
+    "coherence_type": "full"
+  },
+  "field": {
+    "field_type": "vector",
+    "shape": [
+      1,
+      128,
+      128,
+      128
+    ],
+    "metadata": {},
+    "total_power": 0.3763459238743406,
+    "duration": 10.0,
+    "spatial_extent": [
+      10.0,
+      10.0,
+      null
+    ]
+  },
+  "properties": {},
+  "validation": {},
+  "notes": ""
+}

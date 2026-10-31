@@ -1,0 +1,23 @@
+{
+  "wave_propagation": {
+    "linear_wave": true,
+    "nls": true
+  },
+  "information": {
+    "distinguishable": "True",
+    "js_divergence": 0.15344976889514278
+  },
+  "spectral": {
+    "fft_peak_freq": 0.0009765625
+  },
+  "nonlinear": {
+    "coupled_transfer_z": 15.707963267948966,
+    "mi_max_gain": 0.1996983346923291
+  },
+  "materials": {
+    "sellmeier_n": 1.5692835201456279
+  },
+  "ensemble": {
+    "n_events": 16
+  }
+}

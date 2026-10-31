@@ -1,0 +1,310 @@
+"""
+XPOCK — HX-241 Independent Research: Skyrmion Number Modulation Modem
+
+Implements skyrmion number modulation (SkM) for free-space optical communication.
+
+Information is encoded as the topological skyrmion number N of an optical
+polarization texture. The skyrmion number is a topological invariant:
+Q = (1/4π) ∫ n · (∂x n × ∂y n) dx dy
+
+where n = (S1,S2,S3)/S0 is the normalized Stokes vector.
+
+Transmitter:
+- Generate skyrmionic polarization field with charge N from constellation
+- The field is |Ψ⟩ = |l₁⟩|H⟩ + |l₂⟩|V⟩ where skyrmion number Q = l₁ - l₂
+
+Receiver:
+- Measure full Stokes field via polarimetry (6 intensity projections)
+- Compute skyrmion number Q from Stokes parameters
+- Hard-decide: ˆN = nearest constellation value
+
+All models are mathematical simulations; results do not establish physical
+feasibility. Hardware would be required for experimental validation.
+
+XPOCK research only — no HX-241 involvement.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Optional, Dict, Any, List, Tuple
+import numpy as np
+
+from xpock.core import WaveEvent, WaveField
+from xpock.properties import (
+    PolarizationTexture,
+    PolarizationConfig,
+    PolarizationState,
+    TopologicalCharge,
+    TopologicalChargeConfig,
+)
+
+# Speed of light
+C_LIGHT = 299792458.0
+
+
+@dataclass
+class ModemConfig:
+    """Configuration for skyrmion number modulation modem.
+
+    Attributes
+    ----------
+    wavelength : float
+        Optical wavelength in meters (default 1550 nm).
+    grid_x : np.ndarray
+        x coordinates in meters.
+    grid_y : np.ndarray
+        y coordinates in meters.
+    skyrmion_radius : float
+        Skyrmion texture radius in meters.
+    constellation : list of int
+        Skyrmion numbers used as constellation points.
+    """
+
+    wavelength: float = 1.55e-6
+    grid_x: Optional[np.ndarray] = None
+    grid_y: Optional[np.ndarray] = None
+    skyrmion_radius: float = 1.0
+    constellation: List[int] = field(default_factory=lambda: [-2, -1, 0, 1, 2])
+
+
+@dataclass
+class ModemResult:
+    """Result of skyrmion modulation/demodulation."""
+
+    transmitted_n: int
+    received_q: float
+    recovered_n: int
+    bit_error: bool
+    bits_transmitted: int
+    bits_received: int
+    snr_db: float
+    path_loss_db: float
+    notes: List[str] = field(default_factory=list)
+
+
+class SkyrmionModem:
+    """Skyrmion number modulation modem for free-space optical communication.
+
+    Encodes information as the topological skyrmion number of an optical
+    polarization texture. The skyrmion number is a topological invariant
+    that (in principle) is preserved during propagation through free space,
+    offering potential robustness against atmospheric turbulence.
+
+    This is a mathematical model; physical implementation would require
+    polarization modulators, Stokes polarimetry cameras, and precise
+    alignment.
+    """
+
+    def __init__(self, config: ModemConfig):
+        self.cfg = config
+        self._constellation = sorted(set(config.constellation))
+        self._n_bits = int(np.floor(np.log2(len(self._constellation))))
+        if self._n_bits < 1:
+            raise ValueError(
+                f"Constellation must have at least 2 values, got {len(self._constellation)}"
+            )
+
+    @property
+    def constellation(self) -> List[int]:
+        return self._constellation
+
+    @property
+    def n_bits(self) -> int:
+        return self._n_bits
+
+    @property
+    def n_states(self) -> int:
+        return len(self._constellation)
+
+    def bits_to_skyrmion(self, bits: np.ndarray) -> int:
+        """Map bit string to skyrmion number.
+
+        Parameters
+        ----------
+        bits : array-like of int (0/1)
+            Bit string of length n_bits.
+
+        Returns
+        -------
+        n : int
+            Skyrmion number from constellation.
+        """
+        bits = np.asarray(bits, dtype=int)
+        if len(bits) != self._n_bits:
+            raise ValueError(
+                f"Expected {self._n_bits} bits, got {len(bits)}"
+            )
+
+        # Convert bit string to integer index
+        idx = 0
+        for b in bits:
+            idx = (idx << 1) | int(b)
+
+        # Map to constellation (cyclic if idx > n_states-1)
+        idx = idx % self.n_states
+        return self._constellation[idx]
+
+    def skyrmion_to_bits(self, n: int) -> np.ndarray:
+        """Map skyrmion number back to bit string.
+
+        Parameters
+        ----------
+        n : int
+            Received skyrmion number.
+
+        Returns
+        -------
+        bits : np.ndarray of int
+            Recovered bit string.
+        """
+        try:
+            idx = self._constellation.index(int(n))
+        except ValueError:
+            # Find nearest constellation value
+            idx = int(np.argmin([abs(n - c) for c in self._constellation]))
+
+        bits = []
+        for i in range(self._n_bits - 1, -1, -1):
+            bits.append((idx >> i) & 1)
+        return np.array(bits, dtype=int)
+
+    def modulate(
+        self, bits: np.ndarray, grid_x: Optional[np.ndarray] = None,
+        grid_y: Optional[np.ndarray] = None
+    ) -> tuple:
+        """Modulate bit string onto a skyrmionic polarization field.
+
+        Parameters
+        ----------
+        bits : array-like of int
+            Bit string of length n_bits.
+        grid_x, grid_y : np.ndarray, optional
+            Spatial coordinates. If None, uses config grids.
+
+        Returns
+        -------
+        Ex : (ny, nx) complex array
+            Ex component of the optical field.
+        Ey : (ny, nx) complex array
+            Ey component of the optical field.
+        n_tx : int
+            Transmitted skyrmion number.
+        """
+        n_tx = self.bits_to_skyrmion(bits)
+
+        x = grid_x if grid_x is not None else self.cfg.grid_x
+        y = grid_y if grid_y is not None else self.cfg.grid_y
+        if x is None or y is None:
+            raise ValueError("Grid arrays must be provided or set in config.")
+
+        # Generate skyrmionic polarization texture
+        # Use Laguerre-Gaussian spatial mode with OAM charge = N
+        # Combined with linear polarization to create skyrmion texture
+        cfg = PolarizationConfig(
+            state=PolarizationState.SKYRMIONIC,
+            angle=0.0,
+            handedness=+1,
+            skyrmion_radius=self.cfg.skyrmion_radius,
+            skyrmion_charge=n_tx,
+        )
+        pol = PolarizationTexture(cfg)
+        Ex, Ey = pol.evaluate(x, y)
+
+        return Ex, Ey, n_tx
+
+    def demodulate(
+        self, Ex: np.ndarray, Ey: np.ndarray
+    ) -> tuple:
+        """Demodulate skyrmion number from received polarization field.
+
+        Parameters
+        ----------
+        Ex : (ny, nx) complex array
+            Received Ex component.
+        Ey : (ny, nx) complex array
+            Received Ey component.
+
+        Returns
+        -------
+        q_measured : float
+            Computed skyrmion number (continuous value).
+        n_rx : int
+            Hard-decided skyrmion number (nearest constellation value).
+        """
+        tc = TopologicalCharge(TopologicalChargeConfig(
+            charge_type="skyrmion",
+            charge=1,
+            core_radius=self.cfg.skyrmion_radius / 10.0,
+        ))
+        q_measured = tc.compute_skyrmion_number(Ex, Ey)
+        n_rx = self._nearest_constellation(q_measured)
+        return q_measured, n_rx
+
+    def _nearest_constellation(self, q: float) -> int:
+        """Find nearest constellation value to measured q."""
+        return self._constellation[int(np.argmin([abs(q - c) for c in self._constellation]))]
+
+    def encode_decode(
+        self, bits: np.ndarray, Ex_rx: np.ndarray, Ey_rx: np.ndarray
+    ) -> ModemResult:
+        """Encode bits, then demodulate from received field.
+
+        Convenience method that combines modulation and demodulation
+        for end-to-end testing.
+        """
+        n_tx = self.bits_to_skyrmion(bits)
+        q_measured, n_rx = self.demodulate(Ex_rx, Ey_rx)
+
+        bits_rx = self.skyrmion_to_bits(n_rx)
+        bit_error = not np.array_equal(bits, bits_rx)
+
+        return ModemResult(
+            transmitted_n=n_tx,
+            received_q=q_measured,
+            recovered_n=n_rx,
+            bit_error=bool(bit_error),
+            bits_transmitted=len(bits),
+            bits_received=len(bits_rx),
+            snr_db=0.0,  # Filled by simulation runner
+            path_loss_db=0.0,
+            notes=[],
+        )
+
+
+def quick_modem_test():
+    """Quick smoke test of skyrmion modem."""
+    nx, ny = 64, 64
+    x = np.linspace(-3, 3, nx)
+    y = np.linspace(-3, 3, ny)
+    X, Y = np.meshgrid(x, y, indexing="xy")
+
+    cfg = ModemConfig(
+        wavelength=1.55e-6,
+        grid_x=X,
+        grid_y=Y,
+        skyrmion_radius=1.0,
+        constellation=[-2, -1, 0, 1, 2],
+    )
+    modem = SkyrmionModem(cfg)
+
+    # Test modulation/demodulation round-trip
+    bits = np.array([1, 0, 1])
+    Ex, Ey, n_tx = modem.modulate(bits, X, Y)
+    q_measured, n_rx = modem.demodulate(Ex, Ey)
+    bits_rx = modem.skyrmion_to_bits(n_rx)
+
+    print(f"Transmitted N: {n_tx}")
+    print(f"Measured Q: {q_measured:.4f}")
+    print(f"Recovered N: {n_rx}")
+    print(f"Bits tx: {bits}")
+    print(f"Bits rx: {bits_rx}")
+    print(f"Bit error: {not np.array_equal(bits, bits_rx)}")
+    print(f"Constellation: {modem.constellation}")
+    print(f"Bits per symbol: {modem.n_bits}")
+
+    return modem
+
+
+if __name__ == "__main__":
+    quick_modem_test()

@@ -1,0 +1,22 @@
+numpy>=1.21
+scipy>=1.7
+matplotlib>=3.4
+pyyaml>=6.0
+
+[:python_version < "3.9"]
+dataclasses
+
+[cpp]
+pybind11>=2.10
+
+[dev]
+pytest>=7.0
+pytest-cov>=3.0
+black>=22.0
+flake8>=4.0
+mypy>=0.950
+
+[fortran]
+
+[fortran:sys_platform == "linux" or sys_platform == "darwin"]
+f2py

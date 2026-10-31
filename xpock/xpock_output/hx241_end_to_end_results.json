@@ -1,0 +1,290 @@
+{
+  "modulation": {
+    "encoded_bits": 5,
+    "dimension_assignments": {
+      "temporal_shape": "PulseShape.GAUSSIAN",
+      "oam_charge": 0,
+      "polarization_state": "PolarizationState.LINEAR",
+      "temporal_duration": 1.0
+    },
+    "constellation_index": 1,
+    "total_bits_per_symbol": 5,
+    "notes": [
+      "Modulated 5 bits onto wave structure",
+      "Constellation size: 72",
+      "Selected index: 1",
+      "Dimensions: ['temporal_shape', 'oam_charge', 'polarization_state', 'temporal_duration']"
+    ]
+  },
+  "demodulation": {
+    "recovered_dimensions": {
+      "temporal_shape": "PulseShape.GAUSSIAN",
+      "oam_charge": 0,
+      "polarization_state": "PolarizationState.LINEAR",
+      "temporal_duration": 0.5
+    },
+    "recovered_bits": 5,
+    "confidence": {
+      "temporal_shape": 0.8,
+      "oam_charge": 1.0,
+      "polarization_state": 0.8,
+      "temporal_duration": 0.9523809523809526
+    },
+    "error": null,
+    "notes": [
+      "Demodulated wave event 75f997a2",
+      "Selected constellation index: 0",
+      "Distance: 0.0238",
+      "Recovered dimensions: 4"
+    ]
+  },
+  "capacity": {
+    "config_name": "wave_structure_analysis",
+    "snr_db": -100.0,
+    "bandwidth_hz": 1000000.0,
+    "shannon_capacity_bps": 0.00014426951601859516,
+    "spectral_efficiency_bps_hz": 1.4426951601859516e-10,
+    "usable_capacity_bps": 0.00010820213701394636,
+    "distinguishable_states": 1,
+    "bits_per_symbol": 0.0,
+    "symbols_per_second": 1000000.0,
+    "net_information_rate_bps": 0.0,
+    "min_js_divergence": 0.0,
+    "avg_js_divergence": 0.0,
+    "notes": [
+      "SNR: -100.0 dB, Bandwidth: 1000000.0 Hz",
+      "Shannon capacity: 0.0 bps (0.000 bps/Hz)",
+      "Distinguishable wave states: 1",
+      "Bits per symbol: 0.000",
+      "Min JS divergence: 0.0000, Avg: 0.0000"
+    ]
+  },
+  "distinguishability": {
+    "n_structures": 4,
+    "metric": "js_divergence",
+    "min_distance": 0.001416563391700855,
+    "max_distance": 0.04658953736366695,
+    "mean_distance": 0.01844211334332186,
+    "most_confusable_pair": [
+      "2",
+      "3"
+    ],
+    "most_distinct_pair": [
+      "0",
+      "3"
+    ],
+    "n_clusters": 1,
+    "cluster_sizes": [
+      4
+    ],
+    "notes": [
+      "Metric: js_divergence, N structures: 4",
+      "Min distance: 0.0014 (pair (np.int64(2), np.int64(3)))",
+      "Max distance: 0.0466 (pair (np.int64(0), np.int64(3)))",
+      "Mean distance: 0.0184",
+      "Clusters (threshold=0.1): 1"
+    ]
+  },
+  "impairment": {
+    "model": "multipath_fading",
+    "path_loss_db": 165.85794599033906,
+    "snr_db": -58.68487121322702,
+    "delay_spread_s": 5e-07,
+    "coherence_bandwidth_hz": 400000.00000000006,
+    "doppler_spread_hz": 10.0,
+    "hx_sim_params": {
+      "packet_loss_rate": 0.9,
+      "duplication_rate": 0.0,
+      "reordering_depth": 0,
+      "corruption_rate": 0.5,
+      "base_latency_us": 0,
+      "jitter_us": 1,
+      "bandwidth_bps": 468,
+      "partition": null,
+      "enabled": true,
+      "source": "xpock_impairment_modeler",
+      "medium": "radio_frequency",
+      "path_loss_db": 165.85794599033906,
+      "snr_db": -58.68487121322702,
+      "delay_spread_s": 5e-07,
+      "coherence_bandwidth_hz": 400000.00000000006,
+      "doppler_spread_hz": 10.0
+    },
+    "notes": [
+      "Shadowing: -5.75 dB",
+      "RMS delay spread: 0.50 us",
+      "Number of multipath taps: 16",
+      "Primary impairment model: multipath_fading",
+      "SNR: -58.7 dB",
+      "Path loss: 165.9 dB"
+    ]
+  },
+  "signal_analysis": {
+    "event_id": "75f997a2-cfd5-495a-989e-0907b1426bea",
+    "n_temporal_features": 2,
+    "n_spectral_features": 2,
+    "n_spatial_features": 2,
+    "n_polarization_features": 4,
+    "n_topological_features": 1,
+    "recovered_modulation": {
+      "temporal_duration": 0.4761904761904763,
+      "temporal_center": -3.77529891373761e-17,
+      "carrier_frequency": 0.0024867959858108648,
+      "bandwidth": 0.0361628380349712,
+      "beam_waist": 0.600561204393225,
+      "polarization": 1.0,
+      "oam_charge": 0
+    },
+    "recovery_confidence": 0.8636363636363636,
+    "snr_estimate_db": 10.0,
+    "bandwidth_estimate_hz": 0.0361628380349712,
+    "duration_estimate_s": 0.4761904761904763,
+    "notes": [
+      "Pulse FWHM: 0.4762 s",
+      "Peak frequency: 0.02, Bandwidth: 0.04",
+      "Beam waist: 0.601 x 1.000 m",
+      "Degree of polarization: 1.000",
+      "OAM per photon: 0.000 hbar"
+    ]
+  },
+  "link_library": [
+    {
+      "medium": "free_space_optical",
+      "path_loss_db": 316.93876627032597,
+      "snr_db": -278.97387903273767,
+      "hx_sim_params": {
+        "packet_loss_rate": 0.9,
+        "duplication_rate": 0.0,
+        "reordering_depth": 0,
+        "corruption_rate": 0.5,
+        "base_latency_us": 0,
+        "jitter_us": 0,
+        "bandwidth_bps": 0,
+        "partition": null,
+        "enabled": true,
+        "source": "xpock_impairment_modeler",
+        "medium": "free_space_optical",
+        "path_loss_db": 316.93876627032597,
+        "snr_db": -278.97387903273767,
+        "delay_spread_s": 0.0,
+        "coherence_bandwidth_hz": 40000000000000.03,
+        "doppler_spread_hz": 0.0
+      }
+    },
+    {
+      "medium": "radio_frequency",
+      "path_loss_db": 205.85794599033906,
+      "snr_db": -98.68487121322703,
+      "hx_sim_params": {
+        "packet_loss_rate": 0.9,
+        "duplication_rate": 0.0,
+        "reordering_depth": 0,
+        "corruption_rate": 0.5,
+        "base_latency_us": 3,
+        "jitter_us": 1,
+        "bandwidth_bps": 0,
+        "partition": null,
+        "enabled": true,
+        "source": "xpock_impairment_modeler",
+        "medium": "radio_frequency",
+        "path_loss_db": 205.85794599033906,
+        "snr_db": -98.68487121322703,
+        "delay_spread_s": 5e-07,
+        "coherence_bandwidth_hz": 400000.00000000006,
+        "doppler_spread_hz": 10.0
+      }
+    },
+    {
+      "medium": "acoustic",
+      "path_loss_db": 13.71291957662541,
+      "snr_db": 154.2519676609629,
+      "hx_sim_params": {
+        "packet_loss_rate": 0.7937689650861832,
+        "duplication_rate": 0.0,
+        "reordering_depth": 0,
+        "corruption_rate": 3.7566716194888695e-16,
+        "base_latency_us": 1,
+        "jitter_us": 117851,
+        "bandwidth_bps": 0,
+        "partition": null,
+        "enabled": true,
+        "source": "xpock_impairment_modeler",
+        "medium": "acoustic",
+        "path_loss_db": 13.71291957662541,
+        "snr_db": 154.2519676609629,
+        "delay_spread_s": 0.23570226039551584,
+        "coherence_bandwidth_hz": 0.848528137423857,
+        "doppler_spread_hz": 1.0
+      }
+    },
+    {
+      "medium": "optical_fiber",
+      "path_loss_db": 438.3178588040777,
+      "snr_db": -400.1982446999273,
+      "hx_sim_params": {
+        "packet_loss_rate": 0.9,
+        "duplication_rate": 0.0,
+        "reordering_depth": 0,
+        "corruption_rate": 0.5,
+        "base_latency_us": 33,
+        "jitter_us": 0,
+        "bandwidth_bps": 0,
+        "partition": null,
+        "enabled": true,
+        "source": "xpock_impairment_modeler",
+        "medium": "optical_fiber",
+        "path_loss_db": 438.3178588040777,
+        "snr_db": -400.1982446999273,
+        "delay_spread_s": 1.7e-11,
+        "coherence_bandwidth_hz": 11764705882.352942,
+        "doppler_spread_hz": 0.0
+      }
+    },
+    {
+      "medium": "magnetic_induction",
+      "path_loss_db": 44.89556644376674,
+      "snr_db": 76.07962075046136,
+      "hx_sim_params": {
+        "packet_loss_rate": 0.9,
+        "duplication_rate": 0.0,
+        "reordering_depth": 0,
+        "corruption_rate": 2.4662546337671228e-08,
+        "base_latency_us": 0,
+        "jitter_us": 0,
+        "bandwidth_bps": 1000000,
+        "partition": null,
+        "enabled": true,
+        "source": "xpock_impairment_modeler",
+        "medium": "magnetic_induction",
+        "path_loss_db": 44.89556644376674,
+        "snr_db": 76.07962075046136,
+        "delay_spread_s": 0.0,
+        "coherence_bandwidth_hz": 4000000.0,
+        "doppler_spread_hz": 0.0
+      }
+    },
+    {
+      "medium": "pressure_wave",
+      "path_loss_db": -69.03383364295362,
+      "snr_db": 223.9884209239021,
+      "hx_sim_params": {
+        "packet_loss_rate": 0.0,
+        "duplication_rate": 0.0,
+        "reordering_depth": 0,
+        "corruption_rate": 3.991700124832837e-23,
+        "base_latency_us": 0,
+        "jitter_us": 728,
+        "bandwidth_bps": 137,
+        "partition": null,
+        "enabled": true,
+        "source": "xpock_impairment_modeler",
+        "medium": "pressure_wave",
+        "path_loss_db": -69.03383364295362,
+        "snr_db": 223.9884209239021,
+        "delay_spread_s": 0.0014577259475218659,
+        "coherence_bandwidth_hz": 137.20000000000002,
+        "doppler_spread_hz": 0.1
+      }
+    }
+  ]
+}
