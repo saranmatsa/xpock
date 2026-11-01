@@ -1952,6 +1952,263 @@ impl Default for NoiseAdaptiveMask {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Mask quality analyzer
+// ---------------------------------------------------------------------------
+
+/// Aggregates quality metrics across multiple masks for trend analysis.
+pub struct MaskQualityAnalyzer {
+    /// History of quality metrics.
+    pub history: Vec<MaskQualityMetrics>,
+    /// Maximum history length.
+    pub max_history: usize,
+}
+
+/// Trend direction for quality metrics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrendDirection {
+    Improving,
+    Degrading,
+    Stable,
+}
+
+impl MaskQualityAnalyzer {
+    /// Create a new quality analyzer.
+    pub fn new(max_history: usize) -> Self {
+        Self {
+            history: Vec::with_capacity(max_history),
+            max_history,
+        }
+    }
+
+    /// Record a new quality measurement.
+    pub fn record(&mut self, metrics: MaskQualityMetrics) {
+        if self.history.len() >= self.max_history {
+            self.history.remove(0);
+        }
+        self.history.push(metrics);
+    }
+
+    /// Returns the trend of the quality score over the history.
+    pub fn quality_trend(&self) -> TrendDirection {
+        if self.history.len() < 2 {
+            return TrendDirection::Stable;
+        }
+        let first = self.history[0].quality_score();
+        let last = self.history.last().unwrap().quality_score();
+        let diff = last - first;
+        if diff > 0.05 {
+            TrendDirection::Improving
+        } else if diff < -0.05 {
+            TrendDirection::Degrading
+        } else {
+            TrendDirection::Stable
+        }
+    }
+
+    /// Returns the average quality score over the history.
+    pub fn average_quality(&self) -> f64 {
+        if self.history.is_empty() {
+            return 0.0;
+        }
+        self.history.iter().map(|m| m.quality_score()).sum::<f64>()
+            / self.history.len() as f64
+    }
+
+    /// Returns the latest quality metrics, if any.
+    pub fn latest(&self) -> Option<&MaskQualityMetrics> {
+        self.history.last()
+    }
+}
+
+impl Default for MaskQualityAnalyzer {
+    fn default() -> Self {
+        Self::new(1000)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Threshold sweep analysis
+// ---------------------------------------------------------------------------
+
+/// Result of evaluating a single threshold value.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ThresholdEvaluation {
+    /// Threshold value tested.
+    pub threshold: f64,
+    /// Valid pixel fraction.
+    pub valid_fraction: f64,
+    /// Number of connected components.
+    pub component_count: usize,
+    /// Quality score.
+    pub quality_score: f64,
+}
+
+/// Sweeps threshold values and evaluates mask quality at each point.
+pub struct ThresholdSweep {
+    /// Minimum threshold to test.
+    pub min_threshold: f64,
+    /// Maximum threshold to test.
+    pub max_threshold: f64,
+    /// Number of steps in the sweep.
+    pub steps: usize,
+}
+
+impl Default for ThresholdSweep {
+    fn default() -> Self {
+        Self {
+            min_threshold: 0.0,
+            max_threshold: 1.0,
+            steps: 50,
+        }
+    }
+}
+
+impl ThresholdSweep {
+    /// Create a new threshold sweep.
+    pub fn new(min: f64, max: f64, steps: usize) -> Self {
+        Self {
+            min_threshold: min,
+            max_threshold: max,
+            steps,
+        }
+    }
+
+    /// Run the sweep on an intensity field.
+    ///
+    /// For each threshold value, creates a binary mask and evaluates quality.
+    pub fn sweep(&self, intensities: &[Vec<f64>]) -> Vec<ThresholdEvaluation> {
+        let mut results = Vec::with_capacity(self.steps);
+        if intensities.is_empty() || intensities[0].is_empty() {
+            return results;
+        }
+
+        let step = (self.max_threshold - self.min_threshold) / (self.steps - 1) as f64;
+        let labeler = ConnectedComponentLabeler::default();
+
+        for i in 0..self.steps {
+            let threshold = self.min_threshold + step * i as f64;
+
+            // Build binary mask at this threshold.
+            let height = intensities.len();
+            let width = intensities[0].len();
+            let mut mask = vec![vec![false; width]; height];
+            let mut valid = 0usize;
+            for y in 0..height {
+                for x in 0..width {
+                    if intensities[y][x] >= threshold {
+                        mask[y][x] = true;
+                        valid += 1;
+                    }
+                }
+            }
+            let valid_fraction = valid as f64 / (width * height) as f64;
+
+            // Count components.
+            let components = labeler.label(&mask);
+            let component_count = components.len();
+
+            // Quality score.
+            let quality = compute_mask_quality(&mask, Some(intensities));
+
+            results.push(ThresholdEvaluation {
+                threshold,
+                valid_fraction,
+                component_count,
+                quality_score: quality.quality_score(),
+            });
+        }
+
+        results
+    }
+
+    /// Find the threshold that maximizes quality score.
+    pub fn best_threshold(&self, intensities: &[Vec<f64>]) -> Option<ThresholdEvaluation> {
+        let results = self.sweep(intensities);
+        results.into_iter().max_by(|a, b| {
+            a.quality_score
+                .partial_cmp(&b.quality_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Mask change detection
+// ---------------------------------------------------------------------------
+
+/// Detects changes between two mask versions.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MaskChangeReport {
+    /// Pixels that changed from false to true.
+    pub newly_valid: usize,
+    /// Pixels that changed from true to false.
+    pub newly_masked: usize,
+    /// Pixels that remained unchanged.
+    pub unchanged: usize,
+    /// Total pixels.
+    pub total_pixels: usize,
+    /// Fraction of pixels that changed.
+    pub change_fraction: f64,
+}
+
+/// Compares two masks and reports differences.
+pub fn detect_mask_changes(
+    before: &[Vec<bool>],
+    after: &[Vec<bool>],
+) -> MaskChangeReport {
+    let height = before.len();
+    let width = if height > 0 { before[0].len() } else { 0 };
+    let total = width * height;
+
+    let mut newly_valid = 0usize;
+    let mut newly_masked = 0usize;
+    let mut unchanged = 0usize;
+
+    for y in 0..height {
+        for x in 0..width {
+            let bv = before[y][x];
+            let av = if y < after.len() && x < after[y].len() {
+                after[y][x]
+            } else {
+                false
+            };
+            match (bv, av) {
+                (false, true) => newly_valid += 1,
+                (true, false) => newly_masked += 1,
+                _ => unchanged += 1,
+            }
+        }
+    }
+
+    let changed = newly_valid + newly_masked;
+    let change_fraction = if total > 0 {
+        changed as f64 / total as f64
+    } else {
+        0.0
+    };
+
+    MaskChangeReport {
+        newly_valid,
+        newly_masked,
+        unchanged,
+        total_pixels: total,
+        change_fraction,
+    }
+}
+
+impl MaskChangeReport {
+    /// Returns true if the change is significant (> 5% of pixels changed).
+    pub fn is_significant(&self) -> bool {
+        self.change_fraction > 0.05
+    }
+
+    /// Returns true if more pixels were masked than unmasked.
+    pub fn net_masking(&self) -> bool {
+        self.newly_masked > self.newly_valid
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2811,5 +3068,290 @@ mod tests {
         let stats = compute_regional_statistics(&[comp], &intensities);
         assert_eq!(stats[0].count, 1);
         assert!((stats[0].mean - 1.0).abs() < 0.001);
+    }
+
+    // ---------------------------------------------------------------------------
+    // MaskQualityAnalyzer tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn mask_quality_analyzer_new() {
+        let analyzer = MaskQualityAnalyzer::new(100);
+        assert_eq!(analyzer.max_history, 100);
+        assert!(analyzer.history.is_empty());
+    }
+
+    #[test]
+    fn mask_quality_analyzer_record_and_trend() {
+        let mut analyzer = MaskQualityAnalyzer::new(100);
+        // First metric: low quality
+        analyzer.record(MaskQualityMetrics {
+            foreground_fraction: 0.5,
+            component_count: 1,
+            largest_component_area: 100,
+            mean_component_area: 100.0,
+            component_area_std: 0.0,
+            entropy: 0.5,
+            spatial_uniformity: 0.5,
+            boundary_complexity: 0.5,
+        });
+        // Second metric: higher quality
+        analyzer.record(MaskQualityMetrics {
+            foreground_fraction: 0.5,
+            component_count: 1,
+            largest_component_area: 100,
+            mean_component_area: 100.0,
+            component_area_std: 0.0,
+            entropy: 0.5,
+            spatial_uniformity: 0.9,
+            boundary_complexity: 0.5,
+        });
+        // Quality should be improving (higher spatial_uniformity)
+        assert_eq!(analyzer.quality_trend(), TrendDirection::Improving);
+        assert!(analyzer.average_quality() > 0.0);
+        assert!(analyzer.latest().is_some());
+    }
+
+    #[test]
+    fn mask_quality_analyzer_degrading_trend() {
+        let mut analyzer = MaskQualityAnalyzer::new(100);
+        analyzer.record(MaskQualityMetrics {
+            foreground_fraction: 0.5,
+            component_count: 1,
+            largest_component_area: 100,
+            mean_component_area: 100.0,
+            component_area_std: 0.0,
+            entropy: 0.5,
+            spatial_uniformity: 0.9,
+            boundary_complexity: 0.5,
+        });
+        analyzer.record(MaskQualityMetrics {
+            foreground_fraction: 0.5,
+            component_count: 1,
+            largest_component_area: 100,
+            mean_component_area: 100.0,
+            component_area_std: 0.0,
+            entropy: 0.5,
+            spatial_uniformity: 0.4,
+            boundary_complexity: 0.5,
+        });
+        assert_eq!(analyzer.quality_trend(), TrendDirection::Degrading);
+    }
+
+    #[test]
+    fn mask_quality_analyzer_stable_trend() {
+        let mut analyzer = MaskQualityAnalyzer::new(100);
+        let m = MaskQualityMetrics {
+            foreground_fraction: 0.5,
+            component_count: 1,
+            largest_component_area: 100,
+            mean_component_area: 100.0,
+            component_area_std: 0.0,
+            entropy: 0.5,
+            spatial_uniformity: 0.7,
+            boundary_complexity: 0.5,
+        };
+        analyzer.record(m.clone());
+        analyzer.record(m);
+        assert_eq!(analyzer.quality_trend(), TrendDirection::Stable);
+    }
+
+    #[test]
+    fn mask_quality_analyzer_single_measurement_stable() {
+        let mut analyzer = MaskQualityAnalyzer::new(100);
+        analyzer.record(MaskQualityMetrics {
+            foreground_fraction: 0.5,
+            component_count: 1,
+            largest_component_area: 100,
+            mean_component_area: 100.0,
+            component_area_std: 0.0,
+            entropy: 0.5,
+            spatial_uniformity: 0.5,
+            boundary_complexity: 0.5,
+        });
+        assert_eq!(analyzer.quality_trend(), TrendDirection::Stable);
+    }
+
+    #[test]
+    fn mask_quality_analyzer_history_limit() {
+        let mut analyzer = MaskQualityAnalyzer::new(3);
+        for i in 0..5 {
+            analyzer.record(MaskQualityMetrics {
+                foreground_fraction: i as f64 / 5.0,
+                component_count: 1,
+                largest_component_area: 100,
+                mean_component_area: 100.0,
+                component_area_std: 0.0,
+                entropy: 0.5,
+                spatial_uniformity: 0.5,
+                boundary_complexity: 0.5,
+            });
+        }
+        assert_eq!(analyzer.history.len(), 3);
+    }
+
+    #[test]
+    fn mask_quality_analyzer_default() {
+        let analyzer = MaskQualityAnalyzer::default();
+        assert_eq!(analyzer.max_history, 1000);
+    }
+
+    // ---------------------------------------------------------------------------
+    // ThresholdSweep tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn threshold_sweep_default_config() {
+        let sweep = ThresholdSweep::default();
+        assert_eq!(sweep.min_threshold, 0.0);
+        assert_eq!(sweep.max_threshold, 1.0);
+        assert_eq!(sweep.steps, 50);
+    }
+
+    #[test]
+    fn threshold_sweep_empty_input() {
+        let sweep = ThresholdSweep::default();
+        let results = sweep.sweep(&[]);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn threshold_sweep_uniform_field() {
+        let sweep = ThresholdSweep::new(0.0, 1.0, 10);
+        let intensities = vec![vec![0.5f64; 10]; 10];
+        let results = sweep.sweep(&intensities);
+        assert_eq!(results.len(), 10);
+        // At threshold 0.0, all pixels valid; at 1.0, none valid (0.5 < 1.0)
+        assert!((results[0].valid_fraction - 1.0).abs() < 0.001);
+        assert_eq!(results.last().unwrap().valid_fraction, 0.0);
+    }
+
+    #[test]
+    fn threshold_sweep_best_threshold() {
+        let sweep = ThresholdSweep::new(0.0, 1.0, 20);
+        let mut intensities = vec![vec![0.0f64; 10]; 10];
+        // Add some bright pixels
+        for y in 3..7 {
+            for x in 3..7 {
+                intensities[y][x] = 0.9;
+            }
+        }
+        let best = sweep.best_threshold(&intensities);
+        assert!(best.is_some());
+        let best = best.unwrap();
+        assert!(best.threshold >= 0.0);
+        assert!(best.threshold <= 1.0);
+    }
+
+    #[test]
+    fn threshold_sweep_monotonic_valid_fraction() {
+        let sweep = ThresholdSweep::new(0.0, 1.0, 20);
+        let intensities: Vec<Vec<f64>> = (0..10).map(|_| vec![0.5f64; 10]).collect();
+        let results = sweep.sweep(&intensities);
+        // Valid fraction should be non-increasing as threshold increases
+        for i in 1..results.len() {
+            assert!(results[i].valid_fraction <= results[i - 1].valid_fraction + 0.001);
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // MaskChangeReport tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn mask_change_report_no_changes() {
+        let before = vec![vec![true, false], vec![false, true]];
+        let after = before.clone();
+        let report = detect_mask_changes(&before, &after);
+        assert_eq!(report.newly_valid, 0);
+        assert_eq!(report.newly_masked, 0);
+        assert_eq!(report.unchanged, 4);
+        assert_eq!(report.total_pixels, 4);
+        assert_eq!(report.change_fraction, 0.0);
+        assert!(!report.is_significant());
+        assert!(!report.net_masking());
+    }
+
+    #[test]
+    fn mask_change_report_all_changed() {
+        let before = vec![vec![true; 4]; 4];
+        let after = vec![vec![false; 4]; 4];
+        let report = detect_mask_changes(&before, &after);
+        assert_eq!(report.newly_valid, 0);
+        assert_eq!(report.newly_masked, 16);
+        assert_eq!(report.unchanged, 0);
+        assert_eq!(report.change_fraction, 1.0);
+        assert!(report.is_significant());
+        assert!(report.net_masking());
+    }
+
+    #[test]
+    fn mask_change_report_mixed() {
+        let before = vec![vec![true, false], vec![false, true]];
+        let after = vec![vec![false, true], vec![true, false]];
+        let report = detect_mask_changes(&before, &after);
+        assert_eq!(report.newly_valid, 2);
+        assert_eq!(report.newly_masked, 2);
+        assert_eq!(report.unchanged, 0);
+        assert_eq!(report.change_fraction, 1.0);
+        assert!(!report.net_masking());
+    }
+
+    #[test]
+    fn mask_change_report_empty() {
+        let before: Vec<Vec<bool>> = vec![];
+        let after: Vec<Vec<bool>> = vec![];
+        let report = detect_mask_changes(&before, &after);
+        assert_eq!(report.total_pixels, 0);
+        assert_eq!(report.change_fraction, 0.0);
+    }
+
+    #[test]
+    fn mask_change_report_mismatched_dimensions() {
+        let before = vec![vec![true; 5]; 5];
+        let after = vec![vec![false; 3]; 3];
+        let report = detect_mask_changes(&before, &after);
+        assert_eq!(report.total_pixels, 25);
+        // After mask only covers 3x3, rest treated as false (newly_masked)
+        assert_eq!(report.newly_valid, 0);
+        assert_eq!(report.newly_masked + report.unchanged, 25);
+    }
+
+    #[test]
+    fn trend_direction_debug_and_clone() {
+        let t = TrendDirection::Improving;
+        let _debug = format!("{:?}", t);
+        assert_eq!(t, TrendDirection::Improving);
+        assert_ne!(t, TrendDirection::Degrading);
+        assert_ne!(t, TrendDirection::Stable);
+    }
+
+    #[test]
+    fn threshold_evaluation_debug_and_clone() {
+        let eval = ThresholdEvaluation {
+            threshold: 0.5,
+            valid_fraction: 0.7,
+            component_count: 3,
+            quality_score: 0.8,
+        };
+        let _debug = format!("{:?}", eval);
+        let cloned = eval.clone();
+        assert_eq!(cloned.threshold, 0.5);
+        assert_eq!(cloned.quality_score, 0.8);
+    }
+
+    #[test]
+    fn mask_change_report_debug_and_clone() {
+        let report = MaskChangeReport {
+            newly_valid: 10,
+            newly_masked: 5,
+            unchanged: 100,
+            total_pixels: 115,
+            change_fraction: 15.0 / 115.0,
+        };
+        let _debug = format!("{:?}", report);
+        let cloned = report.clone();
+        assert_eq!(cloned.newly_valid, 10);
+        assert!(cloned.is_significant());
     }
 }
