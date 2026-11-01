@@ -539,6 +539,751 @@ pub fn lib_ms() -> u64 {
         .unwrap_or(0)
 }
 
+// ---------------------------------------------------------------------------
+// Noise profile
+// ---------------------------------------------------------------------------
+
+/// Characterized noise profile for a specific environment or channel.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NoiseProfile {
+    /// Profile identifier.
+    pub id: String,
+    /// Dominant noise type.
+    pub noise_type: NoiseType,
+    /// Average noise floor intensity.
+    pub noise_floor: f64,
+    /// Noise variance.
+    pub variance: f64,
+    /// Temporal correlation coefficient (0.0 = independent, 1.0 = fully correlated).
+    pub temporal_correlation: f64,
+    /// Spatial correlation coefficient.
+    pub spatial_correlation: f64,
+    /// Spectral exponent (for 1/f^alpha noise).
+    pub spectral_exponent: f64,
+    /// Confidence in the profile characterization (0.0 to 1.0).
+    pub characterization_confidence: f64,
+    /// Last update timestamp.
+    pub last_updated: u64,
+}
+
+impl NoiseProfile {
+    /// Create a new noise profile.
+    pub fn new(
+        id: String,
+        noise_type: NoiseType,
+        noise_floor: f64,
+        variance: f64,
+    ) -> Self {
+        Self {
+            id,
+            noise_type,
+            noise_floor,
+            variance,
+            temporal_correlation: 0.0,
+            spatial_correlation: 0.0,
+            spectral_exponent: 1.0,
+            characterization_confidence: 0.5,
+            last_updated: lib_ms(),
+        }
+    }
+
+    /// Update the profile with a new noise measurement.
+    pub fn update(
+        &mut self,
+        noise_floor: f64,
+        variance: f64,
+        confidence: f64,
+    ) {
+        // Exponential moving average update.
+        let alpha = 0.3;
+        self.noise_floor = alpha * noise_floor + (1.0 - alpha) * self.noise_floor;
+        self.variance = alpha * variance + (1.0 - alpha) * self.variance;
+        self.characterization_confidence =
+            (self.characterization_confidence + confidence) / 2.0;
+        self.last_updated = lib_ms();
+    }
+
+    /// Returns the signal-to-noise ratio for a given signal intensity.
+    pub fn snr_for_intensity(&self, signal_intensity: f64) -> f64 {
+        if self.noise_floor > 0.0 {
+            10.0 * (signal_intensity / self.noise_floor).log10()
+        } else {
+            f64::INFINITY
+        }
+    }
+
+    /// Returns true if the profile is well characterized.
+    pub fn is_well_characterized(&self) -> bool {
+        self.characterization_confidence > 0.7
+    }
+}
+
+/// Collection of noise profiles for different channels or environments.
+#[derive(Debug, Clone, Default)]
+pub struct NoiseProfileRegistry {
+    profiles: std::collections::HashMap<String, NoiseProfile>,
+    default_profile: Option<String>,
+}
+
+impl NoiseProfileRegistry {
+    /// Create a new empty registry.
+    pub fn new() -> Self {
+        Self {
+            profiles: std::collections::HashMap::new(),
+            default_profile: None,
+        }
+    }
+
+    /// Register a noise profile.
+    pub fn register(&mut self, profile: NoiseProfile) {
+        let id = profile.id.clone();
+        self.profiles.insert(id.clone(), profile);
+        if self.default_profile.is_none() {
+            self.default_profile = Some(id);
+        }
+    }
+
+    /// Get a profile by ID.
+    pub fn get(&self, id: &str) -> Option<&NoiseProfile> {
+        self.profiles.get(id)
+    }
+
+    /// Get the default profile.
+    pub fn default_profile(&self) -> Option<&NoiseProfile> {
+        self.default_profile
+            .as_deref()
+            .and_then(|id| self.profiles.get(id))
+    }
+
+    /// Returns the number of registered profiles.
+    pub fn len(&self) -> usize {
+        self.profiles.len()
+    }
+
+    /// Returns true if the registry is empty.
+    pub fn is_empty(&self) -> bool {
+        self.profiles.is_empty()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Interference source localization
+// ---------------------------------------------------------------------------
+
+/// An estimated interference source location and characteristics.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InterferenceSource {
+    /// Source identifier.
+    pub source_id: u64,
+    /// Estimated position (x, y) in field coordinates.
+    pub position: (f64, f64),
+    /// Interference type.
+    pub interference_type: InterferenceType,
+    /// Estimated strength (0.0 to 1.0).
+    pub strength: f64,
+    /// Confidence in the localization (0.0 to 1.0).
+    pub confidence: f64,
+    /// First detection timestamp.
+    pub first_seen: u64,
+    /// Last detection timestamp.
+    pub last_seen: u64,
+    /// Number of detections.
+    pub detection_count: u32,
+}
+
+impl InterferenceSource {
+    /// Create a new interference source estimate.
+    pub fn new(
+        source_id: u64,
+        position: (f64, f64),
+        interference_type: InterferenceType,
+        strength: f64,
+    ) -> Self {
+        let now = lib_ms();
+        Self {
+            source_id,
+            position,
+            interference_type,
+            strength,
+            confidence: 0.5,
+            first_seen: now,
+            last_seen: now,
+            detection_count: 1,
+        }
+    }
+
+    /// Update the source estimate with a new detection.
+    pub fn update(
+        &mut self,
+        position: (f64, f64),
+        strength: f64,
+        confidence: f64,
+    ) {
+        // Exponential moving average for position and strength.
+        let alpha = 0.4;
+        self.position = (
+            alpha * position.0 + (1.0 - alpha) * self.position.0,
+            alpha * position.1 + (1.0 - alpha) * self.position.1,
+        );
+        self.strength = alpha * strength + (1.0 - alpha) * self.strength;
+        self.confidence = (self.confidence + confidence) / 2.0;
+        self.last_seen = lib_ms();
+        self.detection_count += 1;
+    }
+
+    /// Returns true if the source is currently active (recently detected).
+    pub fn is_active(&self, max_age_ms: u64) -> bool {
+        lib_ms().saturating_sub(self.last_seen) < max_age_ms
+    }
+
+    /// Returns the source's reliability score.
+    pub fn reliability(&self) -> f64 {
+        (self.confidence * 0.6 + (self.detection_count as f64 / 10.0).clamp(0.0, 1.0) * 0.4)
+            .clamp(0.0, 1.0)
+    }
+}
+
+/// Tracks interference sources across multiple detections.
+pub struct InterferenceTracker {
+    sources: std::collections::HashMap<u64, InterferenceSource>,
+    next_source_id: u64,
+    /// Maximum distance for associating a detection with an existing source.
+    pub max_association_distance: f64,
+    /// Maximum age in ms before a source is considered inactive.
+    pub max_source_age_ms: u64,
+}
+
+impl InterferenceTracker {
+    /// Create a new interference tracker.
+    pub fn new() -> Self {
+        Self {
+            sources: std::collections::HashMap::new(),
+            next_source_id: 1,
+            max_association_distance: 100.0,
+            max_source_age_ms: 60_000,
+        }
+    }
+
+    /// Process interference detections and update source tracks.
+    ///
+    /// `detections` is a list of (position, interference_type, strength, confidence) tuples.
+    /// Returns the list of active interference sources.
+    pub fn update(
+        &mut self,
+        detections: Vec<((f64, f64), InterferenceType, f64, f64)>,
+    ) -> Vec<InterferenceSource> {
+        let mut matched_source_ids = std::collections::HashSet::new();
+
+        for (position, interference_type, strength, confidence) in detections {
+            let best_source_id = self.find_best_source(
+                position,
+                interference_type,
+                &matched_source_ids,
+            );
+
+            if let Some(source_id) = best_source_id {
+                if let Some(source) = self.sources.get_mut(&source_id) {
+                    source.update(position, strength, confidence);
+                    matched_source_ids.insert(source_id);
+                }
+            } else {
+                let source_id = self.next_source_id;
+                self.next_source_id += 1;
+                let source = InterferenceSource::new(
+                    source_id,
+                    position,
+                    interference_type,
+                    strength,
+                );
+                self.sources.insert(source_id, source);
+                matched_source_ids.insert(source_id);
+            }
+        }
+
+        // Remove inactive sources.
+        self.sources
+            .retain(|_, s| s.is_active(self.max_source_age_ms));
+
+        self.sources.values().cloned().collect()
+    }
+
+    /// Find the best existing source to match a detection.
+    fn find_best_source(
+        &self,
+        position: (f64, f64),
+        interference_type: InterferenceType,
+        excluded: &std::collections::HashSet<u64>,
+    ) -> Option<u64> {
+        let mut best_id: Option<u64> = None;
+        let mut best_dist: f64 = f64::INFINITY;
+
+        for (id, source) in &self.sources {
+            if excluded.contains(id) {
+                continue;
+            }
+            if source.interference_type != interference_type {
+                continue;
+            }
+
+            let dx = position.0 - source.position.0;
+            let dy = position.1 - source.position.1;
+            let dist = (dx * dx + dy * dy).sqrt();
+
+            if dist < self.max_association_distance && dist < best_dist {
+                best_dist = dist;
+                best_id = Some(*id);
+            }
+        }
+
+        best_id
+    }
+
+    /// Returns the number of active sources.
+    pub fn active_source_count(&self) -> usize {
+        self.sources.values().filter(|s| s.is_active(self.max_source_age_ms)).count()
+    }
+
+    /// Returns all active sources.
+    pub fn active_sources(&self) -> Vec<InterferenceSource> {
+        self.sources
+            .values()
+            .filter(|s| s.is_active(self.max_source_age_ms))
+            .cloned()
+            .collect()
+    }
+
+    /// Reset all sources.
+    pub fn reset(&mut self) {
+        self.sources.clear();
+        self.next_source_id = 1;
+    }
+}
+
+impl Default for InterferenceTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Classification confidence calibration
+// ---------------------------------------------------------------------------
+
+/// Calibrated confidence score with uncertainty bounds.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CalibratedConfidence {
+    /// Point estimate of confidence (0.0 to 1.0).
+    pub point_estimate: f64,
+    /// Lower bound of confidence interval (0.0 to 1.0).
+    pub lower_bound: f64,
+    /// Upper bound of confidence interval (0.0 to 1.0).
+    pub upper_bound: f64,
+    /// Number of observations used for calibration.
+    pub observation_count: u32,
+}
+
+impl CalibratedConfidence {
+    /// Create a new calibrated confidence.
+    pub fn new(point_estimate: f64, observation_count: u32) -> Self {
+        let uncertainty = if observation_count == 0 {
+            0.5
+        } else {
+            1.0 / (observation_count as f64).sqrt()
+        };
+        Self {
+            point_estimate: point_estimate.clamp(0.0, 1.0),
+            lower_bound: (point_estimate - uncertainty).clamp(0.0, 1.0),
+            upper_bound: (point_estimate + uncertainty).clamp(0.0, 1.0),
+            observation_count,
+        }
+    }
+
+    /// Returns true if the confidence interval is narrow (well calibrated).
+    pub fn is_well_calibrated(&self) -> bool {
+        (self.upper_bound - self.lower_bound) < 0.2
+    }
+
+    /// Returns the margin of uncertainty.
+    pub fn uncertainty_margin(&self) -> f64 {
+        (self.upper_bound - self.lower_bound) / 2.0
+    }
+}
+
+/// Calibrates classification confidence based on historical accuracy.
+pub struct ConfidenceCalibrator {
+    /// Calibration bins for different confidence ranges.
+    bins: Vec<CalibrationBin>,
+    /// Number of bins.
+    pub num_bins: usize,
+}
+
+/// A single calibration bin.
+#[derive(Debug, Clone, Default)]
+struct CalibrationBin {
+    /// Lower confidence bound for this bin.
+    pub lower: f64,
+    /// Upper confidence bound for this bin.
+    pub upper: f64,
+    /// Number of predictions in this bin.
+    pub count: u32,
+    /// Number of correct predictions in this bin.
+    pub correct: u32,
+}
+
+impl ConfidenceCalibrator {
+    /// Create a new confidence calibrator.
+    pub fn new(num_bins: usize) -> Self {
+        Self {
+            bins: (0..num_bins)
+                .map(|i| CalibrationBin {
+                    lower: i as f64 / num_bins as f64,
+                    upper: (i + 1) as f64 / num_bins as f64,
+                    count: 0,
+                    correct: 0,
+                })
+                .collect(),
+            num_bins,
+        }
+    }
+
+    /// Record a classification result for calibration.
+    pub fn record(
+        &mut self,
+        predicted_confidence: f64,
+        was_correct: bool,
+    ) {
+        let bin_index =
+            ((predicted_confidence.clamp(0.0, 1.0)) * self.num_bins as f64) as usize;
+        let bin_index = bin_index.min(self.num_bins - 1);
+
+        if let Some(bin) = self.bins.get_mut(bin_index) {
+            bin.count += 1;
+            if was_correct {
+                bin.correct += 1;
+            }
+        }
+    }
+
+    /// Get calibrated confidence for a raw confidence value.
+    pub fn calibrate(&self, raw_confidence: f64) -> CalibratedConfidence {
+        let bin_index =
+            ((raw_confidence.clamp(0.0, 1.0)) * self.num_bins as f64) as usize;
+        let bin_index = bin_index.min(self.num_bins - 1);
+
+        let bin = &self.bins[bin_index];
+        let calibrated = if bin.count > 0 {
+            bin.correct as f64 / bin.count as f64
+        } else {
+            raw_confidence
+        };
+
+        CalibratedConfidence::new(calibrated, bin.count)
+    }
+
+    /// Returns the expected calibration error (ECE).
+    pub fn expected_calibration_error(&self) -> f64 {
+        let total: u32 = self.bins.iter().map(|b| b.count).sum();
+        if total == 0 {
+            return 0.0;
+        }
+
+        let ece = self
+            .bins
+            .iter()
+            .map(|b| {
+                if b.count == 0 {
+                    0.0
+                } else {
+                    let accuracy = b.correct as f64 / b.count as f64;
+                    let avg_confidence = (b.lower + b.upper) / 2.0;
+                    (b.count as f64 / total as f64) * (accuracy - avg_confidence).abs()
+                }
+            })
+            .sum::<f64>();
+
+        ece
+    }
+
+    /// Returns the number of calibration records.
+    pub fn total_records(&self) -> u32 {
+        self.bins.iter().map(|b| b.count).sum()
+    }
+}
+
+impl Default for ConfidenceCalibrator {
+    fn default() -> Self {
+        Self::new(10)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Multi-sensor fusion
+// ---------------------------------------------------------------------------
+
+/// A classification from a single sensor.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SensorClassification {
+    /// Sensor identifier.
+    pub sensor_id: String,
+    /// Classification result.
+    pub classification: NoiseClassification,
+    /// Sensor reliability weight (0.0 to 1.0).
+    pub weight: f64,
+    /// Timestamp of classification.
+    pub timestamp: u64,
+}
+
+/// Fuses classifications from multiple sensors using weighted voting.
+pub struct MultiSensorFusion {
+    /// Sensor weights.
+    sensor_weights: std::collections::HashMap<String, f64>,
+    /// Classification history per sensor.
+    history: std::collections::HashMap<String, Vec<NoiseClassification>>,
+    /// Maximum history per sensor.
+    max_history_per_sensor: usize,
+}
+
+impl MultiSensorFusion {
+    /// Create a new multi-sensor fusion engine.
+    pub fn new() -> Self {
+        Self {
+            sensor_weights: std::collections::HashMap::new(),
+            history: std::collections::HashMap::new(),
+            max_history_per_sensor: 100,
+        }
+    }
+
+    /// Register a sensor with a weight.
+    pub fn register_sensor(&mut self, sensor_id: String, weight: f64) {
+        self.sensor_weights.insert(sensor_id, weight.clamp(0.0, 1.0));
+    }
+
+    /// Fuse multiple sensor classifications into a single consensus.
+    pub fn fuse(
+        &mut self,
+        classifications: Vec<SensorClassification>,
+    ) -> NoiseClassification {
+        // Record classifications in history.
+        for cls in &classifications {
+            self.history
+                .entry(cls.sensor_id.clone())
+                .or_default()
+                .push(cls.classification.clone());
+            if let Some(hist) = self.history.get_mut(&cls.sensor_id) {
+                if hist.len() > self.max_history_per_sensor {
+                    hist.remove(0);
+                }
+            }
+        }
+
+        // If no classifications, return InsufficientData.
+        if classifications.is_empty() {
+            return NoiseClassification::InsufficientData {
+                missing: "no sensor data".into(),
+            };
+        }
+
+        // Weighted voting for each classification type.
+        let mut signal_weight = 0.0f64;
+        let mut noise_weight = 0.0f64;
+        let mut interference_weight = 0.0f64;
+        let mut false_positive_weight = 0.0f64;
+        let mut corrupted_weight = 0.0f64;
+
+        for cls in &classifications {
+            let weight = self
+                .sensor_weights
+                .get(&cls.sensor_id)
+                .copied()
+                .unwrap_or(1.0);
+
+            match &cls.classification {
+                NoiseClassification::CleanSignal { .. } => {
+                    signal_weight += weight;
+                }
+                NoiseClassification::Noise { .. } => {
+                    noise_weight += weight;
+                }
+                NoiseClassification::Interference { .. } => {
+                    interference_weight += weight;
+                }
+                NoiseClassification::FalsePositive { .. } => {
+                    false_positive_weight += weight;
+                }
+                NoiseClassification::Corrupted { .. } => {
+                    corrupted_weight += weight;
+                }
+            }
+        }
+
+        // Determine the winning classification.
+        let max_weight = signal_weight
+            .max(noise_weight)
+            .max(interference_weight)
+            .max(false_positive_weight)
+            .max(corrupted_weight);
+
+        if max_weight == 0.0 {
+            return NoiseClassification::InsufficientData {
+                missing: "zero weight".into(),
+            };
+        }
+
+        if signal_weight == max_weight {
+            // Return the highest confidence clean signal.
+            let best_signal = classifications
+                .iter()
+                .filter_map(|cls| match &cls.classification {
+                    NoiseClassification::CleanSignal {
+                        signal, confidence, ..
+                    } => Some((signal, confidence, weight)),
+                    _ => None,
+                })
+                .max_by(|a, b| a.2.partial_cmp(&b.2).unwrap());
+
+            if let Some((signal, confidence, _)) = best_signal {
+                return NoiseClassification::CleanSignal {
+                    signal: signal.clone(),
+                    noise_floor: 0.0,
+                    snr_db: 0.0,
+                    _confidence: *confidence,
+                };
+            }
+        }
+
+        if noise_weight == max_weight {
+            return NoiseClassification::Noise {
+                noise_type: NoiseType::Unknown("fused".into()),
+                noise_floor: 0.0,
+                confidence: 0.5,
+            };
+        }
+
+        if interference_weight == max_weight {
+            return NoiseClassification::Interference {
+                interference_type: InterferenceType::Unknown("fused".into()),
+                severity: 0.5,
+                affected_region: None,
+            };
+        }
+
+        if false_positive_weight == max_weight {
+            return NoiseClassification::FalsePositive {
+                q_candidate: 0,
+                reason: "fused false positive".into(),
+                confidence: 0.5,
+            };
+        }
+
+        NoiseClassification::Corrupted {
+            reason: "fused corrupted".into(),
+            integrity_score: 0.0,
+            partial_q: None,
+        }
+    }
+
+    /// Update a sensor's weight based on performance.
+    pub fn update_sensor_weight(&mut self, sensor_id: &str, new_weight: f64) {
+        self.sensor_weights
+            .insert(sensor_id.to_string(), new_weight.clamp(0.0, 1.0));
+    }
+
+    /// Returns the weight for a sensor.
+    pub fn sensor_weight(&self, sensor_id: &str) -> f64 {
+        self.sensor_weights.get(sensor_id).copied().unwrap_or(1.0)
+    }
+
+    /// Returns the number of registered sensors.
+    pub fn sensor_count(&self) -> usize {
+        self.sensor_weights.len()
+    }
+}
+
+impl Default for MultiSensorFusion {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Adaptive threshold controller
+// ---------------------------------------------------------------------------
+
+/// Controls adaptive threshold adjustment based on classification history.
+pub struct AdaptiveThresholdController {
+    /// Current threshold value.
+    pub current_threshold: f64,
+    /// Minimum threshold.
+    pub min_threshold: f64,
+    /// Maximum threshold.
+    pub max_threshold: f64,
+    /// Target false positive rate (0.0 to 1.0).
+    pub target_false_positive_rate: f64,
+    /// Learning rate for threshold adjustment.
+    pub learning_rate: f64,
+    /// History of false positive rates.
+    pub fpr_history: Vec<f64>,
+    /// Maximum history length.
+    pub max_history: usize,
+}
+
+impl AdaptiveThresholdController {
+    /// Create a new adaptive threshold controller.
+    pub fn new(
+        initial_threshold: f64,
+        min_threshold: f64,
+        max_threshold: f64,
+    ) -> Self {
+        Self {
+            current_threshold: initial_threshold,
+            min_threshold,
+            max_threshold,
+            target_false_positive_rate: 0.1,
+            learning_rate: 0.05,
+            fpr_history: Vec::new(),
+            max_history: 100,
+        }
+    }
+
+    /// Update the threshold based on the observed false positive rate.
+    pub fn update(&mut self, false_positive_rate: f64) {
+        self.fpr_history.push(false_positive_rate);
+        if self.fpr_history.len() > self.max_history {
+            self.fpr_history.remove(0);
+        }
+
+        let error = false_positive_rate - self.target_false_positive_rate;
+        let adjustment = self.learning_rate * error;
+        self.current_threshold = (self.current_threshold + adjustment)
+            .clamp(self.min_threshold, self.max_threshold);
+    }
+
+    /// Returns the average false positive rate over the history.
+    pub fn avg_false_positive_rate(&self) -> f64 {
+        if self.fpr_history.is_empty() {
+            return 0.0;
+        }
+        self.fpr_history.iter().sum::<f64>() / self.fpr_history.len() as f64
+    }
+
+    /// Returns true if the controller has converged (FPR close to target).
+    pub fn is_converged(&self, tolerance: f64) -> bool {
+        self.avg_false_positive_rate().abs_diff(self.target_false_positive_rate) < tolerance
+    }
+
+    /// Reset the controller.
+    pub fn reset(&mut self) {
+        self.current_threshold = (self.min_threshold + self.max_threshold) / 2.0;
+        self.fpr_history.clear();
+    }
+}
+
+impl Default for AdaptiveThresholdController {
+    fn default() -> Self {
+        Self::new(0.5, 0.01, 0.99)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
