@@ -1405,6 +1405,553 @@ pub fn compute_regional_statistics(
     stats
 }
 
+// ---------------------------------------------------------------------------
+// Threshold optimization
+// ---------------------------------------------------------------------------
+
+/// Strategies for automatic threshold optimization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptimizationStrategy {
+    /// Maximize separation between foreground and background (Otsu).
+    Otsu,
+    /// Minimize within-class variance.
+    KittlerIllingworth,
+    /// Preserve a target fraction of valid pixels.
+    TargetFraction(f64),
+}
+
+/// Result of threshold optimization.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ThresholdOptimizationResult {
+    /// Optimal threshold value.
+    pub optimal_threshold: f64,
+    /// Strategy used.
+    pub strategy: OptimizationStrategy,
+    /// Between-class variance at optimum.
+    pub between_class_variance: f64,
+    /// Within-class variance at optimum.
+    pub within_class_variance: f64,
+    /// Number of iterations performed.
+    pub iterations: u32,
+    /// Converged flag.
+    pub converged: bool,
+}
+
+/// Automatic threshold optimizer using multiple strategies.
+pub struct ThresholdOptimizer {
+    /// Maximum number of iterations.
+    pub max_iterations: u32,
+    /// Convergence tolerance.
+    pub tolerance: f64,
+    /// Target valid fraction (for TargetFraction strategy).
+    pub target_fraction: f64,
+}
+
+impl Default for ThresholdOptimizer {
+    fn default() -> Self {
+        Self {
+            max_iterations: 100,
+            tolerance: 1e-4,
+            target_fraction: 0.5,
+        }
+    }
+}
+
+impl ThresholdOptimizer {
+    /// Optimize threshold using Otsu's method.
+    pub fn optimize_otsu(&self, intensities: &[Vec<f64>]) -> ThresholdOptimizationResult {
+        if intensities.is_empty() || intensities[0].is_empty() {
+            return ThresholdOptimizationResult {
+                optimal_threshold: 0.0,
+                strategy: OptimizationStrategy::Otsu,
+                between_class_variance: 0.0,
+                within_class_variance: 0.0,
+                iterations: 0,
+                converged: false,
+            };
+        }
+
+        let height = intensities.len();
+        let width = intensities[0].len();
+        let total = width * height;
+
+        // Find max intensity for normalization.
+        let max_intensity = intensities
+            .iter()
+            .flatten()
+            .cloned()
+            .fold(0.0f64, f64::max);
+
+        if max_intensity <= 0.0 {
+            return ThresholdOptimizationResult {
+                optimal_threshold: 0.0,
+                strategy: OptimizationStrategy::Otsu,
+                between_class_variance: 0.0,
+                within_class_variance: 0.0,
+                iterations: 1,
+                converged: true,
+            };
+        }
+
+        // Build histogram.
+        let bins = 256usize;
+        let mut histogram = vec![0usize; bins];
+        let bin_width = max_intensity / bins as f64;
+
+        for row in intensities {
+            for &val in row {
+                let bin = ((val / max_intensity) * bins as f64).floor() as usize;
+                let bin = bin.min(bins - 1);
+                histogram[bin] += 1;
+            }
+        }
+
+        let total_sum: f64 = histogram
+            .iter()
+            .enumerate()
+            .map(|(i, &count)| i as f64 * count as f64)
+            .sum();
+
+        let mut best_threshold_bin = 0;
+        let mut max_variance = 0.0f64;
+        let mut best_between = 0.0f64;
+        let mut best_within = 0.0f64;
+
+        let mut w0 = 0usize;
+        let mut sum0 = 0.0f64;
+
+        for t in 0..bins {
+            w0 += histogram[t];
+            if w0 == 0 {
+                continue;
+            }
+            let w1 = total - w0;
+            if w1 == 0 {
+                break;
+            }
+
+            sum0 += t as f64 * histogram[t] as f64;
+            let mean0 = sum0 / w0 as f64;
+            let mean1 = (total_sum - sum0) / w1 as f64;
+
+            let between_variance = w0 as f64 * w1 as f64 * (mean0 - mean1).powi(2);
+
+            // Within-class variance.
+            let mut within = 0.0f64;
+            for i in 0..=t {
+                within += histogram[i] as f64 * (i as f64 - mean0).powi(2);
+            }
+            for i in (t + 1)..bins {
+                within += histogram[i] as f64 * (i as f64 - mean1).powi(2);
+            }
+            within = within / total as f64;
+
+            if between_variance > max_variance {
+                max_variance = between_variance;
+                best_threshold_bin = t;
+                best_between = between_variance;
+                best_within = within;
+            }
+        }
+
+        let optimal_threshold =
+            (best_threshold_bin as f64 + 0.5) * bin_width * max_intensity / bins as f64;
+
+        ThresholdOptimizationResult {
+            optimal_threshold,
+            strategy: OptimizationStrategy::Otsu,
+            between_class_variance: best_between,
+            within_class_variance: best_within,
+            iterations: bins as u32,
+            converged: true,
+        }
+    }
+
+    /// Optimize threshold to achieve a target valid fraction.
+    pub fn optimize_target_fraction(
+        &self,
+        intensities: &[Vec<f64>],
+    ) -> ThresholdOptimizationResult {
+        let height = intensities.len();
+        if height == 0 || intensities[0].is_empty() {
+            return ThresholdOptimizationResult {
+                optimal_threshold: 0.0,
+                strategy: OptimizationStrategy::TargetFraction(self.target_fraction),
+                between_class_variance: 0.0,
+                within_class_variance: 0.0,
+                iterations: 0,
+                converged: false,
+            };
+        }
+
+        let width = intensities[0].len();
+        let total = width * height;
+
+        // Collect all intensities into a flat sorted list.
+        let mut values: Vec<f64> = intensities.iter().flatten().cloned().collect();
+        values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+        // Target: want target_fraction of pixels above threshold.
+        // So threshold should be at the (1 - target_fraction) quantile.
+        let idx = ((1.0 - self.target_fraction) * total as f64).floor() as usize;
+        let idx = idx.min(total - 1);
+        let optimal_threshold = values[idx];
+
+        // Count pixels above threshold.
+        let above = values.iter().filter(|&&v| v >= optimal_threshold).count();
+        let actual_fraction = above as f64 / total as f64;
+
+        ThresholdOptimizationResult {
+            optimal_threshold,
+            strategy: OptimizationStrategy::TargetFraction(self.target_fraction),
+            between_class_variance: 0.0,
+            within_class_variance: 0.0,
+            iterations: 1,
+            converged: (actual_fraction - self.target_fraction).abs() < 0.05,
+        }
+    }
+
+    /// Run optimization with the configured strategy.
+    pub fn optimize(
+        &self,
+        intensities: &[Vec<f64>],
+        strategy: OptimizationStrategy,
+    ) -> ThresholdOptimizationResult {
+        match strategy {
+            OptimizationStrategy::Otsu => self.optimize_otsu(intensities),
+            OptimizationStrategy::KittlerIllingworth => {
+                // Kittler-Illingworth is similar to Otsu but with different
+                // cost function; fall back to Otsu for this implementation.
+                self.optimize_otsu(intensities)
+            }
+            OptimizationStrategy::TargetFraction(_) => {
+                self.optimize_target_fraction(intensities)
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Mask refinement pipeline
+// ---------------------------------------------------------------------------
+
+/// Stages of the mask refinement pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefinementStage {
+    /// Initial thresholding.
+    Threshold,
+    /// Morphological opening (remove noise).
+    Opening,
+    /// Morphological closing (fill holes).
+    Closing,
+    /// Connected component filtering (remove small components).
+    ComponentFilter,
+    /// Boundary smoothing.
+    BoundarySmooth,
+}
+
+/// Configuration for mask refinement.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RefinementConfig {
+    /// Stages to apply, in order.
+    pub stages: Vec<RefinementStage>,
+    /// Morphological radius for opening/closing.
+    pub morphology_radius: usize,
+    /// Minimum component size for filtering.
+    pub min_component_size: usize,
+    /// Whether to recompute statistics after refinement.
+    pub recompute_stats: bool,
+}
+
+impl Default for RefinementConfig {
+    fn default() -> Self {
+        Self {
+            stages: vec![
+                RefinementStage::Threshold,
+                RefinementStage::Opening,
+                RefinementStage::Closing,
+                RefinementStage::ComponentFilter,
+            ],
+            morphology_radius: 2,
+            min_component_size: 16,
+            recompute_stats: true,
+        }
+    }
+}
+
+/// Result of mask refinement.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RefinementResult {
+    /// Refined mask.
+    pub mask: Vec<Vec<bool>>,
+    /// Quality metrics after refinement.
+    pub quality: MaskQualityMetrics,
+    /// Number of pixels changed during refinement.
+    pub pixels_changed: usize,
+    /// Stages applied.
+    pub stages_applied: Vec<RefinementStage>,
+}
+
+/// Refines a binary mask through multiple pipeline stages.
+pub struct MaskRefinementPipeline {
+    config: RefinementConfig,
+}
+
+impl Default for MaskRefinementPipeline {
+    fn default() -> Self {
+        Self {
+            config: RefinementConfig::default(),
+        }
+    }
+}
+
+impl MaskRefinementPipeline {
+    /// Create a new pipeline with the given configuration.
+    pub fn new(config: RefinementConfig) -> Self {
+        Self { config }
+    }
+
+    /// Run the refinement pipeline on a mask.
+    pub fn refine(
+        &self,
+        mask: &[Vec<bool>],
+        intensities: Option<&[Vec<f64>]>,
+    ) -> RefinementResult {
+        let mut current = mask.to_vec();
+        let mut pixels_changed = 0usize;
+        let mut stages_applied = Vec::new();
+
+        for stage in &self.config.stages {
+            let previous = current.clone();
+            current = match stage {
+                RefinementStage::Threshold => {
+                    // Threshold stage: mask is already thresholded, no change.
+                    current
+                }
+                RefinementStage::Opening => {
+                    MorphologicalOps::open(&current, self.config.morphology_radius)
+                }
+                RefinementStage::Closing => {
+                    MorphologicalOps::close(&current, self.config.morphology_radius)
+                }
+                RefinementStage::ComponentFilter => {
+                    let labeler = ConnectedComponentLabeler {
+                        min_size: self.config.min_component_size,
+                        max_components: None,
+                    };
+                    let components = labeler.label(&current);
+                    let valid_labels: std::collections::HashSet<u32> =
+                        components.iter().map(|c| c.label).collect();
+                    let height = current.len();
+                    let width = if height > 0 { current[0].len() } else { 0 };
+                    let mut filtered = vec![vec![false; width]; height];
+                    for comp in &components {
+                        for &(x, y) in &comp.pixels {
+                            if y < height && x < width {
+                                filtered[y][x] = true;
+                            }
+                        }
+                    }
+                    filtered
+                }
+                RefinementStage::BoundarySmooth => {
+                    // Boundary smoothing: apply opening then closing (morphological
+                    // gradient smoothing).
+                    let opened = MorphologicalOps::open(&current, 1);
+                    MorphologicalOps::close(&opened, 1)
+                }
+            };
+
+            // Count changed pixels.
+            let height = current.len();
+            if height > 0 {
+                let width = current[0].len();
+                for y in 0..height {
+                    for x in 0..width {
+                        if previous[y][x] != current[y][x] {
+                            pixels_changed += 1;
+                        }
+                    }
+                }
+            }
+            stages_applied.push(*stage);
+        }
+
+        // Compute quality metrics.
+        let quality = compute_mask_quality(&current, intensities);
+
+        RefinementResult {
+            mask: current,
+            quality,
+            pixels_changed,
+            stages_applied,
+        }
+    }
+
+    /// Returns the refinement configuration.
+    pub fn config(&self) -> &RefinementConfig {
+        &self.config
+    }
+
+    /// Update the refinement configuration.
+    pub fn update_config(&mut self, config: RefinementConfig) {
+        self.config = config;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Noise-adaptive masking
+// ---------------------------------------------------------------------------
+
+/// Noise level estimate for adaptive masking.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NoiseEstimate {
+    /// Estimated noise standard deviation.
+    pub sigma: f64,
+    /// Estimated noise mean.
+    pub mean: f64,
+    /// Signal-to-noise ratio estimate.
+    pub snr_estimate: f64,
+    /// Confidence in the noise estimate (0.0 to 1.0).
+    pub confidence: f64,
+}
+
+/// Noise-adaptive mask that adjusts threshold based on estimated noise level.
+pub struct NoiseAdaptiveMask {
+    /// Base intensity mask.
+    base_mask: IntensityMask,
+    /// Current noise estimate.
+    noise_estimate: NoiseEstimate,
+    /// Noise multiplier for threshold (threshold = base + multiplier * sigma).
+    pub noise_multiplier: f64,
+    /// Minimum threshold regardless of noise.
+    pub min_threshold: f64,
+}
+
+impl NoiseAdaptiveMask {
+    /// Create a new noise-adaptive mask.
+    pub fn new(base_threshold: f64) -> Self {
+        Self {
+            base_mask: IntensityMask::new(base_threshold),
+            noise_estimate: NoiseEstimate {
+                sigma: 0.0,
+                mean: 0.0,
+                snr_estimate: 0.0,
+                confidence: 0.0,
+            },
+            noise_multiplier: 2.0,
+            min_threshold: 0.0,
+        }
+    }
+
+    /// Estimate noise from the darkest pixels of the field.
+    ///
+    /// Uses the lowest 10% of intensity values as the noise floor estimate.
+    pub fn estimate_noise(&mut self, intensities: &[Vec<f64>]) -> NoiseEstimate {
+        let mut values: Vec<f64> = intensities.iter().flatten().cloned().collect();
+        values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+        let n = values.len();
+        if n == 0 {
+            return self.noise_estimate;
+        }
+
+        // Use bottom 10% as noise samples.
+        let noise_count = (n as f64 * 0.1).ceil() as usize;
+        let noise_count = noise_count.max(1).min(n);
+        let noise_values: Vec<f64> = values.iter().take(noise_count).cloned().collect();
+
+        let mean = noise_values.iter().sum::<f64>() / noise_count as f64;
+        let variance = noise_values
+            .iter()
+            .map(|v| (v - mean).powi(2))
+            .sum::<f64>()
+            / noise_count as f64;
+        let sigma = variance.sqrt();
+
+        // Signal is the top 10%.
+        let signal_count = (n as f64 * 0.1).ceil() as usize;
+        let signal_count = signal_count.max(1).min(n);
+        let signal_values: Vec<f64> = values.iter().rev().take(signal_count).cloned().collect();
+        let signal_mean = signal_values.iter().sum::<f64>() / signal_count as f64;
+
+        let snr_estimate = if sigma > 0.0 {
+            (signal_mean - mean) / sigma
+        } else {
+            f64::INFINITY
+        };
+
+        // Confidence based on sample size.
+        let confidence = (noise_count as f64 / 100.0).min(1.0);
+
+        self.noise_estimate = NoiseEstimate {
+            sigma,
+            mean,
+            snr_estimate,
+            confidence,
+        };
+
+        self.noise_estimate
+    }
+
+    /// Apply noise-adaptive masking to a Stokes field.
+    ///
+    /// The threshold is adjusted based on the estimated noise level:
+    /// threshold = max(base_threshold * max_intensity, min_threshold, noise_multiplier * sigma + noise_mean)
+    pub fn apply_adaptive(
+        &mut self,
+        stokes_field: &[[[f64; 4]; 256]; 256],
+    ) -> &IntensityMask {
+        // Extract intensities.
+        let mut intensities = vec![vec![0.0f64; 256]; 256];
+        let mut max_intensity = 0.0f64;
+        for y in 0..256 {
+            for x in 0..256 {
+                let s0 = stokes_field[y][x][0];
+                intensities[y][x] = s0.abs();
+                if s0.abs() > max_intensity {
+                    max_intensity = s0.abs();
+                }
+            }
+        }
+
+        // Estimate noise.
+        self.estimate_noise(&intensities);
+
+        // Compute adaptive threshold.
+        let base = self.base_mask.config.intensity_threshold * max_intensity;
+        let noise_based = self.noise_estimate.mean
+            + self.noise_multiplier * self.noise_estimate.sigma;
+        let effective_threshold = base.max(self.min_threshold).max(noise_based);
+
+        // Apply mask with the effective threshold.
+        self.base_mask.config.intensity_threshold =
+            if max_intensity > 0.0 { effective_threshold / max_intensity } else { 0.0 };
+        self.base_mask.apply(stokes_field);
+
+        // Override threshold with noise-adaptive value.
+        self.base_mask.threshold = effective_threshold;
+
+        &self.base_mask
+    }
+
+    /// Returns the current noise estimate.
+    pub fn noise_estimate(&self) -> NoiseEstimate {
+        self.noise_estimate
+    }
+
+    /// Returns a reference to the base mask.
+    pub fn base_mask(&self) -> &IntensityMask {
+        &self.base_mask
+    }
+}
+
+impl Default for NoiseAdaptiveMask {
+    fn default() -> Self {
+        Self::new(0.1)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
