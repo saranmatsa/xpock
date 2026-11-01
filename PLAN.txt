@@ -1,0 +1,323 @@
+## Godmode Plan: `xpock-integration` Rust Crate
+
+Research complete (44+ substantive web searches). All findings integrated. Godmode active — maximum engineering, every pattern, formal verification, production-grade from line one. Ponytail fully inverted.
+
+---
+
+### Research Findings Applied
+
+| Domain | Source | Application |
+|--------|--------|-------------|
+| Skyrmion number modulation (SkM) | arXiv:2603.11548 (Hara/Iwamoto/Sugiura, Univ. Tokyo) | Topological invariant integer encoding, intensity-based masking at receiver |
+| Experimental validation | Wang et al., Science Advances 2026 | 270m free-space link, N=1,2 robust through turbulence, "SKYRME" ASCII |
+| Generalized skyrmion number | Nature Comm 2026 | Tuple of integers Z^k via de Rham cohomology, no boundary restrictions |
+| Deep diffractive detectors | arxiv:2512.11115 | 14-level topological alphabet, N∈[-7,7], crosstalk matrix |
+| Partially coherent skyrmions | arxiv:2604.20207 | Stability under strong turbulence |
+| Stokes polarimetry | NIST, Springer, MDPI | 6-measurement demodulation matrix, error propagation, calibration |
+| FSO channel | Optica, JLT, Optics Letters | Rytov variance, Kolmogorov/von Karman, Gamma-Gamma, multiple phase screens |
+| Clean-slate | HX-241 CARRIER-CONTRACT | No TCP/IP/UDP/QUIC/WebRTC/libp2p/HTTP/DNS |
+
+---
+
+### Godmode Architecture Patterns (ALL Simultaneously)
+
+- **Clean Architecture / Onion / Hexagonal** — dependency inversion everywhere
+- **DDD** — aggregates, entities, value objects, domain events, repositories, factories
+- **Event Sourcing** — event store, projections, snapshots, replay
+- **CQRS** — separate read/write models
+- **Actor Model** — supervision trees, mailboxes, location transparency
+- **Microservices patterns** — circuit breakers, bulkheads, sidecars
+- **Module/Plugin** — hot-swappable, versioned, capability-negotiated
+- **All protocols abstracted** — GraphQL, REST, gRPC, WebSocket interfaces behind traits
+- **Schema registry** — Protobuf/Avro/JSON Schema evolution
+- **API Gateway** — rate limiting, auth, transformation
+- **Service Mesh** — mTLS, traffic splitting, retries, observability
+- **CRDTs** — merge semantics with proofs
+- **Multi-region active-active** — conflict-free replication
+- **Polyglot persistence** — SQL, time-series, graph, object store abstractions
+- **Data Mesh** — domain-oriented ownership
+- **Event-driven** — event bus, sagas, choreography
+- **Temporal workflows** — durable execution, compensation
+- **Actor supervision** — fault isolation, restart strategies
+- **Lock-free data structures** — where provably correct
+
+---
+
+### File Tree Plan (100–1,000 files where genuinely necessary)
+
+```
+xpock-integration/
+├── Cargo.toml
+├── Cargo.lock
+├── ADRs/
+│   ├── 0001-carrier-agnostic-foundation.md
+│   ├── 0002-topological-signal-detection.md
+│   ├── 0003-generalized-skyrmion-number.md
+│   ├── 0004-stokes-polarimetry-receiver.md
+│   ├── 0005-turbulence-channel-model.md
+│   ├── 0006-error-correction-topological-qec.md
+│   ├── 0007-event-sourcing-state-sync.md
+│   ├── 0008-actor-supervision-model.md
+│   ├── 0009-security-capability-model.md
+│   └── 0010-formal-verification-approach.md
+├── specs/
+│   ├── tla+/
+│   │   ├── SignalDetection.tla
+│   ├── alloy/
+│   │   ├── TopologicalInvariants.als
+│   └── coq/
+│       └── SkyrmionNumberConservation.v
+├── src/
+│   ├── lib.rs                          — crate root, public API
+│   ├── types.rs                        — core value objects, domain types
+│   ├── errors.rs                       — comprehensive error hierarchy
+│   ├── events/                         — Event Sourcing
+│   │   ├── mod.rs
+│   │   ├── event_store.rs              — immutable event log
+│   │   ├── event_sourcing.rs           — aggregate replay
+│   │   ├── projections.rs              — read model projections
+│   │   ├── snapshots.rs                — snapshot management
+│   │   └── replay.rs                   — event replay engine
+│   ├── cqrs/                           — CQRS separation
+│   │   ├── mod.rs
+│   │   ├── write_model.rs              — command side
+│   │   ├── read_model.rs               — query side
+│   │   ├── command_bus.rs              — command dispatch
+│   │   └── query_bus.rs                — query dispatch
+│   ├── actor/                          — Actor Model
+│   │   ├── mod.rs
+│   │   ├── actor_system.rs             — actor runtime
+│   │   ├── supervisor.rs               — supervision tree
+│   │   ├── mailbox.rs                  — actor mailbox
+│   │   ├── address.rs                  — actor address
+│   │   ├── context.rs                  — actor context
+│   │   └── router.rs                   — actor router
+│   ├── detection/                      — Topological signal detection
+│   │   ├── mod.rs
+│   │   ├── signal_detector.rs          — core detection engine
+│   │   ├── skyrmion_number.rs          — skyrmion number computation
+│   │   ├── generalized_skyrmion.rs     — generalized skyrmion number (Z^k)
+│   │   ├── noise_classifier.rs         — noise/interference/false-positive classification
+│   │   ├── threshold_engine.rs         — adaptive thresholding
+│   │   ├── intensity_masking.rs        — intensity-based masking (Hara et al.)
+│   │   ├── crosstalk_matrix.rs         — crosstalk analysis (arxiv:2512.11115)
+│   │   ├── constellation.rs            — topological constellation management
+│   │   ├── demodulator.rs              — skyrmion demodulation
+│   │   ├── recovery.rs                 — detection recovery
+│   │   └── validators/                 — signal validators
+│   │       ├── mod.rs
+│   │       ├── topological_validator.rs
+│   │       ├── boundary_validator.rs
+│   │       └── numerical_validator.rs
+│   ├── receiver/                       — Optical receiver design
+│   │   ├── mod.rs
+│   │   ├── stokes_polarimetry.rs       — Stokes parameter measurement
+│   │   ├── demodulation_matrix.rs      — 6-measurement demodulation matrix
+│   │   ├── calibration.rs              — polarimeter calibration
+│   │   ├── error_propagation.rs        — error propagation through inversion
+│   │   ├── photon_detection.rs         — photon counting model
+│   │   └── background_rejection.rs     — background noise rejection
+│   ├── channel/                        — FSO channel model
+│   │   ├── mod.rs
+│   │   ├── turbulence.rs               — Kolmogorov/von Karman phase screens
+│   │   ├── rytov_variance.rs           — Rytov variance computation
+│   │   ├── phase_screen.rs             — multiple phase screen propagation
+│   │   ├── gamma_gamma.rs              — Gamma-Gamma fading
+│   │   ├── scintillation.rs            — scintillation index
+│   │   └── channel_capacity.rs         — Shannon capacity under turbulence
+│   ├── validation/                     — HX-241 contract validation
+│   │   ├── mod.rs
+│   │   ├── contract_validator.rs       — I-CARR, I-TRANS conformance
+│   │   ├── conformance_checker.rs      — schema conformance
+│   │   ├── integrity.rs                — BLAKE3/SHA-256 integrity
+│   │   └── contract_types.rs           — contract type definitions
+│   ├── integration/                    — HX-241 integration
+│   │   ├── mod.rs
+│   │   ├── adapter.rs                  — XPOCK Python → Rust types
+│   │   ├── data_flow.rs                — end-to-end data flow
+│   │   ├── boundaries.rs               — security boundaries
+│   │   ├── interfaces.rs               — public interfaces
+│   │   ├── carrier_adapter.rs          — carrier-agnostic carrier adapter
+│   │   └── serialization.rs            — JSON/Rust serialization
+│   ├── recovery/                       — Edge case & failure recovery
+│   │   ├── mod.rs
+│   │   ├── edge_case_handler.rs        — malformed input handling
+│   │   ├── sync_recovery.rs            — synchronization failure recovery
+│   │   ├── numerical_stability.rs      — numerical instability handling
+│   │   ├── environmental.rs            — environmental extremes
+│   │   └── recovery_strategies.rs      — recovery strategy patterns
+│   ├── security/                       — Security & capability model
+│   │   ├── mod.rs
+│   │   ├── capability_tokens.rs        — capability-based auth
+│   │   ├── authentication.rs           — node authentication
+│   │   ├── authorization.rs            — policy enforcement
+│   │   ├── key_establishment.rs        — key establishment
+│   │   ├── key_rotation.rs             — key rotation
+│   │   └── key_revocation.rs           — key revocation
+│   ├── crypto/                         — Verified cryptographic primitives
+│   │   ├── mod.rs
+│   │   ├── ed25519_signatures.rs       — Ed25519 signatures
+│   │   ├── xchacha20poly1305.rs        — XChaCha20-Poly1305
+│   │   ├── sha256.rs                   — SHA-256
+│   │   └── blake3.rs                   — BLAKE3
+│   ├── crdt/                           — CRDT state synchronization
+│   │   ├── mod.rs
+│   │   ├── grow_only_set.rs            — G-Set
+│   │   ├── last_writer_wins.rs         — LWW-Register
+│   │   ├── pncounter.rs                — PN-Counter
+│   │   ├── observed_remove_set.rs      — OR-Set
+│   │   └── merge_semantics.rs          — merge semantics with proofs
+│   ├── bft/                            — Byzantine fault tolerance
+│   │   ├── mod.rs
+│   │   ├── consensus.rs                — BFT consensus
+│   │   ├── quorum.rs                   — quorum management
+│   │   └── replica_manager.rs          — replica management
+│   ├── simulation/                     — Simulation framework
+│   │   ├── mod.rs
+│   │   ├── network_simulator.rs        — network simulation
+│   │   ├── node_simulator.rs           — node simulation
+│   │   ├── channel_simulator.rs        — channel simulation
+│   │   ├── scenario_runner.rs          — scenario execution
+│   │   └── metrics_collector.rs        — simulation metrics
+│   ├── observability/                  — OpenTelemetry native
+│   │   ├── mod.rs
+│   │   ├── tracing.rs                  — distributed tracing
+│   │   ├── metrics.rs                  — RED + USE metrics
+│   │   ├── logging.rs                  — structured logging
+│   │   └── health_checks.rs            — health monitoring
+│   ├── gateway/                        — API gateway patterns
+│   │   ├── mod.rs
+│   │   ├── rate_limiter.rs             — rate limiting
+│   │   ├── auth_gateway.rs             — authentication gateway
+│   │   └── transformation.rs           — request transformation
+│   ├── mesh/                           — Service mesh patterns
+│   │   ├── mod.rs
+│   │   ├── mtls.rs                     — mTLS
+│   │   ├── traffic_split.rs            — traffic splitting
+│   │   ├── circuit_breaker.rs          — circuit breaker
+│   │   └── bulkhead.rs                 — bulkhead isolation
+│   ├── persistence/                    — Polyglot persistence
+│   │   ├── mod.rs
+│   │   ├── sql_store.rs                — SQL storage
+│   │   ├── time_series.rs              — time-series storage
+│   │   ├── graph_store.rs              — graph storage
+│   │   └── object_store.rs             — object storage
+│   └── data_mesh/                      — Data mesh patterns
+│       ├── mod.rs
+│       ├── domain_owner.rs             — domain ownership
+│       └── self_serve.rs               — self-serve infrastructure
+├── benches/
+│   ├── detection_benchmark.rs
+│   ├── channel_benchmark.rs
+│   ├── crypto_benchmark.rs
+│   └── integration_benchmark.rs
+├── tests/
+│   ├── unit_tests.rs                   — 100% coverage unit tests
+│   ├── integration_tests.rs            — full stack integration
+│   ├── e2e_tests.rs                    — end-to-end tests
+│   ├── property_tests.rs               — property-based tests
+│   ├── model_checking_tests.rs         — model checking
+│   ├── fuzz_tests.rs                   — fuzzing harness
+│   ├── chaos_tests.rs                  — chaos engineering
+│   ├── load_tests.rs                   — load testing
+│   ├── contract_tests.rs               — contract testing
+│   └── adversarial_tests.rs            — adversarial validation (10,000+ cases)
+├── formal/
+│   ├── tla+/
+│   │   ├── SignalDetection.tla
+│   │   ├── TopologicalInvariants.tla
+│   │   └── ChannelRobustness.tla
+│   ├── alloy/
+│   │   ├── SkyrmionTopology.als
+│   │   └── SystemInvariants.als
+│   └── coq/
+│       ├── SkyrmionNumber.v
+│       └── DetectionCorrectness.v
+├── docs/
+│   ├── ARCHITECTURE.md
+│   ├── INTEGRATION.md
+│   ├── API_REFERENCE.md
+│   ├── SECURITY.md
+│   ├── DEPLOYMENT.md
+│   └── FORMAL_VERIFICATION.md
+├── scripts/
+│   ├── run_adversarial.sh
+│   ├── run_formal_verification.sh
+│   ├── run_benchmarks.sh
+│   └── count_loc.sh
+└── examples/
+    ├── basic_detection.rs
+    ├── turbulence_simulation.rs
+    └── hx241_integration.rs
+```
+
+**File count: ~130+ files** — within the 100–1,000 range, each genuinely necessary for godmode's all-patterns architecture.
+
+---
+
+### Implementation Stages (Progressive, ~1,000 LOC each)
+
+| Stage | Files | Target LOC | Focus |
+|-------|-------|-----------|-------|
+| **Stage 1** | `lib.rs`, `types.rs`, `errors.rs`, `detection/mod.rs`, `detection/signal_detector.rs`, `detection/skyrmion_number.rs`, `detection/noise_classifier.rs`, `detection/threshold_engine.rs`, `detection/intensity_masking.rs` | ~1,000 impl LOC | Core topological signal detection, signal-vs-noise, noise classification, adaptive thresholds, intensity masking |
+| **Stage 2** | `detection/generalized_skyrmion.rs`, `detection/crosstalk_matrix.rs`, `detection/constellation.rs`, `detection/demodulator.rs`, `detection/recovery.rs`, `detection/validators/` (4 files) | ~1,000 impl LOC | Generalized skyrmion number, crosstalk, constellation, demodulation, recovery, validators |
+| **Stage 3** | `receiver/` (6 files), `channel/` (6 files) | ~1,000 impl LOC | Stokes polarimetry, demodulation matrix, calibration, turbulence model, Rytov variance, phase screens, Gamma-Gamma, channel capacity |
+| **Stage 4** | `events/` (6 files), `cqrs/` (5 files), `actor/` (6 files) | ~1,000 impl LOC | Event sourcing, CQRS, actor model, supervision |
+| **Stage 5** | `validation/` (4 files), `integration/` (6 files), `recovery/` (5 files) | ~1,000 impl LOC | Contract validation, integration architecture, edge case handling, recovery |
+| **Stage 6** | `security/` (6 files), `crypto/` (4 files), `crdt/` (5 files), `bft/` (4 files) | ~1,000 impl LOC | Capability model, verified crypto, CRDT sync, BFT |
+| **Stage 7** | `simulation/` (5 files), `observability/` (4 files), `gateway/` (4 files), `mesh/` (4 files), `persistence/` (4 files), `data_mesh/` (2 files) | ~1,000 impl LOC | Simulation, observability, gateway, mesh, persistence, data mesh |
+
+**Total: ~7,000+ impl LOC** — substantially exceeds 1,600 minimum.
+
+---
+
+### Testing Strategy (ALL Required, Godmode)
+
+- **Unit tests**: 100% coverage, mutation testing survival rate > 90%
+- **Integration tests**: Full stack, contract testing
+- **E2E tests**: Production-like, chaos injection
+- **Property-based tests**: All pure functions
+- **Model checking**: TLA+/Alloy for critical paths
+- **Formal proofs**: Coq/Lean for crypto/correctness
+- **Fuzzing**: All parsers/inputs
+- **Chaos engineering**: Scheduled fault injection
+- **Load testing**: SLA validation
+- **Contract testing**: Consumer-driven contracts
+
+---
+
+### Acceptance Criteria (LOC, excluding mod.rs/lib.rs/Cargo.toml/headers/trivial)
+
+| Metric | Minimum | Target |
+|--------|---------|--------|
+| Qualifying total LOC | 2,400 | 7,000+ |
+| Real implementation LOC (no tests) | 1,600 | 6,000+ |
+| Substantive test LOC | 800 | 2,000+ |
+
+Measured via `bash count_loc.sh <path/to/file.rs>`.
+
+---
+
+### Mandatory Workflow (ONE FILE AT A TIME)
+
+1. Create/modify **one file**
+2. `git add <file>` → `git commit` → `git push origin main`
+3. Verify: `git log --oneline -1` + `git status` clean
+4. Only then next file
+5. Commit format: `crate: component — what changed — why`
+6. Push OOM failures: wait 5s, retry
+
+---
+
+### Constraints (Absolute)
+
+- **No TCP/IP/UDP/QUIC/WebRTC/libp2p/HTTP/DNS/cellular/Wi-Fi/Bluetooth** — carrier-agnostic
+- **Crypto only**: ed25519, xchacha20poly1305, sha256, blake3
+- **XPOCK/Python is not a runtime dependency** — output is JSON/Rust source only
+- **No stubs, placeholders, hardcoded outcomes** — production-grade only
+- **Tests alongside implementation** — not postponed
+- **Modify only XPOCK; never touch HX-241**
+
+---
+
+**GO not yet given.** Waiting for your signal to begin writing `src/lib.rs` (file 1 of ~130+).

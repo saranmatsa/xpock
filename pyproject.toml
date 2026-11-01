@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xpock"
+version = "0.1.0"
+description = "XPOCK — Wave-Structure Generator: finite physical wave events with independently controllable physical properties"
+requires-python = ">=3.9"
+authors = [{ name = "xpock", email = "xpock@local" }]
+license = { text = "Proprietary — research use" }
+readme = "README.md"
+keywords = ["wave", "optics", "topological", "skyrmion", "vortex", "spatiotemporal", "information"]
+
+dependencies = [
+    "numpy>=1.21",
+    "scipy>=1.7",
+    "matplotlib>=3.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=3.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
