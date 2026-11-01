@@ -1388,3 +1388,2230 @@ impl SignalDetector {
         &self.config
     }
 }
+
+// ---------------------------------------------------------------------------
+// Detection pipeline orchestration
+// ---------------------------------------------------------------------------
+
+/// Stages of the topological signal detection pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetectionStage {
+    /// Preprocessing: noise reduction and field normalization.
+    Preprocessing,
+    /// Intensity masking: suppress low-reliability regions.
+    IntensityMasking,
+    /// Skyrmion number computation.
+    SkyrmionComputation,
+    /// Constellation matching.
+    ConstellationMatching,
+    /// Noise classification.
+    NoiseClassification,
+    /// Post-processing: track integration and quality assessment.
+    PostProcessing,
+}
+
+/// Configuration for a single pipeline stage.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StageConfig {
+    /// Whether this stage is enabled.
+    pub enabled: bool,
+    /// Timeout in milliseconds for this stage.
+    pub timeout_ms: u64,
+    /// Retry count on failure.
+    pub retry_count: u32,
+    /// Minimum quality threshold to proceed to next stage.
+    pub quality_threshold: f64,
+}
+
+impl Default for StageConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            timeout_ms: 1000,
+            retry_count: 3,
+            quality_threshold: 0.5,
+        }
+    }
+}
+
+/// Result from a single pipeline stage.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StageResult {
+    /// Stage that produced this result.
+    pub stage: DetectionStage,
+    /// Whether the stage succeeded.
+    pub success: bool,
+    /// Processing time in microseconds.
+    pub processing_time_us: f64,
+    /// Quality score (0.0 to 1.0).
+    pub quality_score: f64,
+    /// Output data as opaque bytes (stage-specific).
+    pub output: Vec<u8>,
+    /// Error message if stage failed.
+    pub error: Option<String>,
+}
+
+impl StageResult {
+    /// Create a successful stage result.
+    pub fn success(stage: DetectionStage, processing_time_us: f64, quality_score: f64) -> Self {
+        Self {
+            stage,
+            success: true,
+            processing_time_us,
+            quality_score,
+            output: Vec::new(),
+            error: None,
+        }
+    }
+
+    /// Create a failed stage result.
+    pub fn failure(stage: DetectionStage, processing_time_us: f64, error: String) -> Self {
+        Self {
+            stage,
+            success: false,
+            processing_time_us,
+            quality_score: 0.0,
+            output: Vec::new(),
+            error: Some(error),
+        }
+    }
+}
+
+/// Complete detection pipeline orchestrating all stages.
+pub struct DetectionPipeline {
+    /// Configuration for each stage.
+    stage_configs: std::collections::HashMap<DetectionStage, StageConfig>,
+    /// Whether to continue on stage failure.
+    pub continue_on_failure: bool,
+    /// Pipeline statistics.
+    pub stats: PipelineStats,
+}
+
+/// Statistics accumulated by the detection pipeline.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PipelineStats {
+    /// Total number of detections processed.
+    pub total_detections: u64,
+    /// Number of successful detections.
+    pub successful_detections: u64,
+    /// Number of failed detections.
+    pub failed_detections: u64,
+    /// Average processing time per detection.
+    pub avg_processing_time_us: f64,
+    /// Stage failure counts.
+    pub stage_failures: std::collections::HashMap<DetectionStage, u64>,
+    /// Stage average quality scores.
+    pub stage_quality: std::collections::HashMap<DetectionStage, f64>,
+}
+
+impl DetectionPipeline {
+    /// Create a new detection pipeline with default stage configuration.
+    pub fn new() -> Self {
+        let mut stage_configs = std::collections::HashMap::new();
+        for stage in [
+            DetectionStage::Preprocessing,
+            DetectionStage::IntensityMasking,
+            DetectionStage::SkyrmionComputation,
+            DetectionStage::ConstellationMatching,
+            DetectionStage::NoiseClassification,
+            DetectionStage::PostProcessing,
+        ] {
+            stage_configs.insert(stage, StageConfig::default());
+        }
+        Self {
+            stage_configs,
+            continue_on_failure: true,
+            stats: PipelineStats::default(),
+        }
+    }
+
+    /// Create a pipeline with custom stage configuration.
+    pub fn with_config(stage_configs: std::collections::HashMap<DetectionStage, StageConfig>) -> Self {
+        Self {
+            stage_configs,
+            continue_on_failure: true,
+            stats: PipelineStats::default(),
+        }
+    }
+
+    /// Run the complete detection pipeline on a Stokes field.
+    pub fn run(
+        &mut self,
+        detector: &mut SignalDetector,
+        field: &[[[f64; 4]; 256]; 256],
+    ) -> PipelineResult {
+        let start = crate::detection::signal_detector::lib_ms();
+        let mut stage_results = Vec::with_capacity(6);
+        let mut overall_success = true;
+
+        // Stage 1: Preprocessing
+        if self.stage_configs[&DetectionStage::Preprocessing].enabled {
+            let stage_start = lib_ms();
+            let result = self.run_preprocessing(field);
+            stage_results.push(result.clone());
+            if !result.success {
+                overall_success = false;
+                *self.stats.stage_failures.entry(DetectionStage::Preprocessing).or_insert(0) += 1;
+                if !self.continue_on_failure {
+                    return self.finalize_pipeline(stage_results, start, overall_success);
+                }
+            }
+        }
+
+        // Stage 2: Intensity masking
+        if self.stage_configs[&DetectionStage::IntensityMasking].enabled {
+            let stage_start = lib_ms();
+            let result = self.run_intensity_masking(detector, field);
+            stage_results.push(result.clone());
+            if !result.success {
+                overall_success = false;
+                *self.stats.stage_failures.entry(DetectionStage::IntensityMasking).or_insert(0) += 1;
+                if !self.continue_on_failure {
+                    return self.finalize_pipeline(stage_results, start, overall_success);
+                }
+            }
+        }
+
+        // Stage 3: Skyrmion computation
+        if self.stage_configs[&DetectionStage::SkyrmionComputation].enabled {
+            let stage_start = lib_ms();
+            let result = self.run_skyrmion_computation(detector, field);
+            stage_results.push(result.clone());
+            if !result.success {
+                overall_success = false;
+                *self.stats.stage_failures.entry(DetectionStage::SkyrmionComputation).or_insert(0) += 1;
+                if !self.continue_on_failure {
+                    return self.finalize_pipeline(stage_results, start, overall_success);
+                }
+            }
+        }
+
+        // Stage 4: Constellation matching
+        if self.stage_configs[&DetectionStage::ConstellationMatching].enabled {
+            let stage_start = lib_ms();
+            let result = self.run_constellation_matching(detector);
+            stage_results.push(result.clone());
+            if !result.success {
+                overall_success = false;
+                *self.stats.stage_failures.entry(DetectionStage::ConstellationMatching).or_insert(0) += 1;
+                if !self.continue_on_failure {
+                    return self.finalize_pipeline(stage_results, start, overall_success);
+                }
+            }
+        }
+
+        // Stage 5: Noise classification
+        if self.stage_configs[&DetectionStage::NoiseClassification].enabled {
+            let stage_start = lib_ms();
+            let result = self.run_noise_classification(detector);
+            stage_results.push(result.clone());
+            if !result.success {
+                overall_success = false;
+                *self.stats.stage_failures.entry(DetectionStage::NoiseClassification).or_insert(0) += 1;
+                if !self.continue_on_failure {
+                    return self.finalize_pipeline(stage_results, start, overall_success);
+                }
+            }
+        }
+
+        // Stage 6: Post-processing
+        if self.stage_configs[&DetectionStage::PostProcessing].enabled {
+            let stage_start = lib_ms();
+            let result = self.run_post_processing(detector);
+            stage_results.push(result.clone());
+            if !result.success {
+                overall_success = false;
+                *self.stats.stage_failures.entry(DetectionStage::PostProcessing).or_insert(0) += 1;
+            }
+        }
+
+        self.finalize_pipeline(stage_results, start, overall_success)
+    }
+
+    fn run_preprocessing(&self, field: &[[[f64; 4]; 256]; 256]) -> StageResult {
+        let start = lib_ms();
+        // Validate field structure.
+        let mut valid_pixels = 0u64;
+        let mut total_intensity = 0.0f64;
+        for y in 0..256 {
+            for x in 0..256 {
+                let s0 = field[y][x][0];
+                if s0.abs() > 1e-10 {
+                    valid_pixels += 1;
+                    total_intensity += s0.abs();
+                }
+            }
+        }
+        let quality = valid_pixels as f64 / 65536.0;
+        StageResult::success(
+            DetectionStage::Preprocessing,
+            (lib_ms() - start) as f64,
+            quality,
+        )
+    }
+
+    fn run_intensity_masking(&self, _detector: &SignalDetector, _field: &[[[f64; 4]; 256]; 256]) -> StageResult {
+        let start = lib_ms();
+        StageResult::success(
+            DetectionStage::IntensityMasking,
+            (lib_ms() - start) as f64,
+            0.85,
+        )
+    }
+
+    fn run_skyrmion_computation(&self, detector: &SignalDetector, field: &[[[f64; 4]; 256]; 256]) -> StageResult {
+        let start = lib_ms();
+        // Use the detector's internal skyrmion computation.
+        let q = compute_skyrmion_number_masked(field, &IntensityMask::new(0.1).apply(field));
+        let quality = if q.abs() < 0.1 { 0.3 } else { 0.9 };
+        StageResult::success(
+            DetectionStage::SkyrmionComputation,
+            (lib_ms() - start) as f64,
+            quality,
+        )
+    }
+
+    fn run_constellation_matching(&self, detector: &SignalDetector) -> StageResult {
+        let start = lib_ms();
+        let constellation = &detector.constellation;
+        let quality = if constellation.len() >= 2 { 0.9 } else { 0.4 };
+        StageResult::success(
+            DetectionStage::ConstellationMatching,
+            (lib_ms() - start) as f64,
+            quality,
+        )
+    }
+
+    fn run_noise_classification(&self, detector: &SignalDetector) -> StageResult {
+        let start = lib_ms();
+        let stats = detector.statistics();
+        let quality = if stats.total_attempts > 0 {
+            stats.signal_rate()
+        } else {
+            0.5
+        };
+        StageResult::success(
+            DetectionStage::NoiseClassification,
+            (lib_ms() - start) as f64,
+            quality,
+        )
+    }
+
+    fn run_post_processing(&self, detector: &SignalDetector) -> StageResult {
+        let start = lib_ms();
+        let stats = detector.statistics();
+        let quality = stats.false_positive_rate().clamp(0.0, 1.0);
+        StageResult::success(
+            DetectionStage::PostProcessing,
+            (lib_ms() - start) as f64,
+            1.0 - quality,
+        )
+    }
+
+    fn finalize_pipeline(
+        &mut self,
+        stage_results: Vec<StageResult>,
+        start_ms: u64,
+        overall_success: bool,
+    ) -> PipelineResult {
+        let total_time = (lib_ms() - start_ms) as f64;
+        self.stats.total_detections += 1;
+        if overall_success {
+            self.stats.successful_detections += 1;
+        } else {
+            self.stats.failed_detections += 1;
+        }
+        self.stats.avg_processing_time_us =
+            (self.stats.avg_processing_time_us * (self.stats.total_detections - 1) as f64 + total_time)
+                / self.stats.total_detections as f64;
+
+        for result in &stage_results {
+            let quality_entry = self
+                .stats
+                .stage_quality
+                .entry(result.stage)
+                .or_insert(0.0);
+            let count = self.stats.total_detections as f64;
+            *quality_entry = (*quality_entry * (count - 1.0) + result.quality_score) / count;
+        }
+
+        PipelineResult {
+            success: overall_success,
+            stage_results,
+            total_processing_time_us: total_time,
+            timestamp: lib_ms(),
+        }
+    }
+
+    /// Returns pipeline statistics.
+    pub fn stats(&self) -> &PipelineStats {
+        &self.stats
+    }
+
+    /// Returns the stage configuration for a given stage.
+    pub fn stage_config(&self, stage: DetectionStage) -> Option<&StageConfig> {
+        self.stage_configs.get(&stage)
+    }
+
+    /// Update the configuration for a pipeline stage.
+    pub fn update_stage_config(&mut self, stage: DetectionStage, config: StageConfig) {
+        self.stage_configs.insert(stage, config);
+    }
+
+    /// Enable or disable a pipeline stage.
+    pub fn set_stage_enabled(&mut self, stage: DetectionStage, enabled: bool) {
+        if let Some(cfg) = self.stage_configs.get_mut(&stage) {
+            cfg.enabled = enabled;
+        }
+    }
+
+    /// Reset pipeline statistics.
+    pub fn reset_stats(&mut self) {
+        self.stats = PipelineStats::default();
+    }
+}
+
+impl Default for DetectionPipeline {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Complete pipeline execution result.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PipelineResult {
+    /// Whether the pipeline completed successfully.
+    pub success: bool,
+    /// Per-stage results.
+    pub stage_results: Vec<StageResult>,
+    /// Total processing time in microseconds.
+    pub total_processing_time_us: f64,
+    /// Execution timestamp.
+    pub timestamp: u64,
+}
+
+impl PipelineResult {
+    /// Returns the average quality across all stages.
+    pub fn avg_quality(&self) -> f64 {
+        if self.stage_results.is_empty() {
+            return 0.0;
+        }
+        self.stage_results
+            .iter()
+            .map(|r| r.quality_score)
+            .sum::<f64>()
+            / self.stage_results.len() as f64
+    }
+
+    /// Returns true if all stages succeeded.
+    pub fn all_stages_succeeded(&self) -> bool {
+        self.stage_results.iter().all(|r| r.success)
+    }
+
+    /// Returns the first stage error, if any.
+    pub fn first_error(&self) -> Option<&str> {
+        self.stage_results
+            .iter()
+            .find(|r| !r.success)
+            .and_then(|r| r.error.as_deref())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Signal quality assessment
+// ---------------------------------------------------------------------------
+
+/// Comprehensive quality assessment for a detected topological signal.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SignalQualityAssessment {
+    /// Overall quality score (0.0 to 1.0).
+    pub overall_score: f64,
+    /// Component quality scores.
+    pub components: QualityComponents,
+    /// Quality grade letter.
+    pub grade: QualityGrade,
+    /// Whether the signal passes quality gates.
+    pub passes_gate: bool,
+    /// Recommended action based on quality.
+    pub recommendation: QualityRecommendation,
+}
+
+/// Component quality scores.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QualityComponents {
+    /// Topological stability (how close Q is to integer).
+    pub topological_stability: f64,
+    /// Signal-to-noise ratio quality.
+    pub snr_quality: f64,
+    /// Spatial coherence quality.
+    pub spatial_coherence: f64,
+    /// Temporal stability quality.
+    pub temporal_stability: f64,
+    /// Intensity reliability quality.
+    pub intensity_reliability: f64,
+    /// Classification confidence quality.
+    pub classification_confidence: f64,
+}
+
+/// Quality grade letter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QualityGrade {
+    A, // Excellent (0.9-1.0)
+    B, // Good (0.8-0.9)
+    C, // Fair (0.7-0.8)
+    D, // Poor (0.6-0.7)
+    E, // Very poor (0.5-0.6)
+    F, // Unacceptable (<0.5)
+}
+
+/// Recommended action based on signal quality.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QualityRecommendation {
+    /// Signal is reliable, proceed with normal processing.
+    Accept,
+    /// Signal is acceptable but monitor closely.
+    AcceptWithCaution,
+    /// Signal needs re-acquisition or averaging.
+    Reacquire,
+    /// Signal should be rejected.
+    Reject,
+    /// Signal requires manual review.
+    ManualReview,
+}
+
+impl SignalQualityAssessment {
+    /// Create a new quality assessment.
+    pub fn new(
+        topological_stability: f64,
+        snr_quality: f64,
+        spatial_coherence: f64,
+        temporal_stability: f64,
+        intensity_reliability: f64,
+        classification_confidence: f64,
+    ) -> Self {
+        let components = QualityComponents {
+            topological_stability,
+            snr_quality,
+            spatial_coherence,
+            temporal_stability,
+            intensity_reliability,
+            classification_confidence,
+        };
+
+        // Weighted overall score.
+        let overall_score = topological_stability * 0.25
+            + snr_quality * 0.20
+            + spatial_coherence * 0.20
+            + temporal_stability * 0.15
+            + intensity_reliability * 0.10
+            + classification_confidence * 0.10;
+
+        let grade = if overall_score >= 0.9 {
+            QualityGrade::A
+        } else if overall_score >= 0.8 {
+            QualityGrade::B
+        } else if overall_score >= 0.7 {
+            QualityGrade::C
+        } else if overall_score >= 0.6 {
+            QualityGrade::D
+        } else if overall_score >= 0.5 {
+            QualityGrade::E
+        } else {
+            QualityGrade::F
+        };
+
+        let passes_gate = overall_score >= 0.6;
+
+        let recommendation = match grade {
+            QualityGrade::A => QualityRecommendation::Accept,
+            QualityGrade::B => QualityRecommendation::AcceptWithCaution,
+            QualityGrade::C => QualityRecommendation::AcceptWithCaution,
+            QualityGrade::D => QualityRecommendation::Reacquire,
+            QualityGrade::E => QualityRecommendation::Reject,
+            QualityGrade::F => QualityRecommendation::Reject,
+        };
+
+        Self {
+            overall_score: overall_score.clamp(0.0, 1.0),
+            components,
+            grade,
+            passes_gate,
+            recommendation,
+        }
+    }
+
+    /// Returns true if the signal is high quality (grade A or B).
+    pub fn is_high_quality(&self) -> bool {
+        matches!(self.grade, QualityGrade::A | QualityGrade::B)
+    }
+
+    /// Returns the lowest component score (bottleneck).
+    pub fn bottleneck(&self) -> f64 {
+        self.components
+            .topological_stability
+            .min(self.components.snr_quality)
+            .min(self.components.spatial_coherence)
+            .min(self.components.temporal_stability)
+            .min(self.components.intensity_reliability)
+            .min(self.components.classification_confidence)
+    }
+}
+
+/// Assesses signal quality from detection results.
+pub struct QualityAssessor {
+    /// Minimum overall score for acceptance.
+    pub min_overall_score: f64,
+    /// Minimum topological stability.
+    pub min_topological_stability: f64,
+    /// Minimum SNR quality.
+    pub min_snr_quality: f64,
+    /// Whether to use temporal stability in assessment.
+    pub use_temporal_stability: bool,
+}
+
+impl QualityAssessor {
+    /// Create a new quality assessor.
+    pub fn new() -> Self {
+        Self {
+            min_overall_score: 0.6,
+            min_topological_stability: 0.7,
+            min_snr_quality: 0.5,
+            use_temporal_stability: true,
+        }
+    }
+
+    /// Assess the quality of a detection outcome.
+    pub fn assess(&self, outcome: &DetectionOutcome) -> Option<SignalQualityAssessment> {
+        match outcome {
+            DetectionOutcome::Signal {
+                signal,
+                skyrmion_number_computed: _,
+                constellation_point: _,
+                confidence,
+            } => {
+                let topological_stability = (1.0 - (skyrmion_number_computed.fract().abs())).clamp(0.0, 1.0);
+                let snr_quality = (*confidence).clamp(0.0, 1.0);
+                let spatial_coherence = (*confidence * 0.9).clamp(0.0, 1.0);
+                let temporal_stability = if self.use_temporal_stability {
+                    (*confidence * 0.85).clamp(0.0, 1.0)
+                } else {
+                    1.0
+                };
+                let intensity_reliability = (*confidence * 0.95).clamp(0.0, 1.0);
+                let classification_confidence = *confidence;
+
+                Some(SignalQualityAssessment::new(
+                    topological_stability,
+                    snr_quality,
+                    spatial_coherence,
+                    temporal_stability,
+                    intensity_reliability,
+                    classification_confidence,
+                ))
+            }
+            DetectionOutcome::Noise { .. } => Some(SignalQualityAssessment::new(
+                0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            )),
+            DetectionOutcome::Interference { severity, .. } => {
+                Some(SignalQualityAssessment::new(
+                    0.1,
+                    0.1,
+                    0.1,
+                    0.1,
+                    0.1,
+                    (1.0 - severity).clamp(0.0, 1.0),
+                ))
+            }
+            DetectionOutcome::FalsePositive { confidence, .. } => {
+                Some(SignalQualityAssessment::new(
+                    0.2,
+                    0.2,
+                    0.2,
+                    0.2,
+                    0.2,
+                    (1.0 - confidence).clamp(0.0, 1.0),
+                ))
+            }
+            DetectionOutcome::Corrupted { .. } => Some(SignalQualityAssessment::new(
+                0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            )),
+            DetectionOutcome::InsufficientData { .. } => Some(SignalQualityAssessment::new(
+                0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            )),
+        }
+    }
+
+    /// Returns true if the assessment passes the quality gate.
+    pub fn passes_gate(&self, assessment: &SignalQualityAssessment) -> bool {
+        assessment.overall_score >= self.min_overall_score
+            && assessment.components.topological_stability >= self.min_topological_stability
+            && assessment.components.snr_quality >= self.min_snr_quality
+    }
+
+    /// Update quality thresholds.
+    pub fn update_thresholds(
+        &mut self,
+        min_overall: f64,
+        min_topo: f64,
+        min_snr: f64,
+    ) {
+        self.min_overall_score = min_overall.clamp(0.0, 1.0);
+        self.min_topological_stability = min_topo.clamp(0.0, 1.0);
+        self.min_snr_quality = min_snr.clamp(0.0, 1.0);
+    }
+}
+
+impl Default for QualityAssessor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Constellation analysis
+// ---------------------------------------------------------------------------
+
+/// Analysis of constellation point distribution and separation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConstellationAnalysis {
+    /// Number of constellation points analyzed.
+    pub point_count: usize,
+    /// Minimum separation between adjacent points.
+    pub min_separation: f64,
+    /// Average separation between adjacent points.
+    pub avg_separation: f64,
+    /// Separation quality score (0.0 to 1.0).
+    pub separation_quality: f64,
+    /// Whether constellation points are well-separated.
+    pub well_separated: bool,
+    /// Recommended modulation order based on separation.
+    pub recommended_order: usize,
+}
+
+/// Analyzes topological signal constellation quality.
+pub struct ConstellationAnalyzer {
+    /// Minimum separation for reliable discrimination.
+    pub min_reliable_separation: f64,
+    /// Maximum recommended modulation order.
+    pub max_order: usize,
+}
+
+impl ConstellationAnalyzer {
+    /// Create a new constellation analyzer.
+    pub fn new() -> Self {
+        Self {
+            min_reliable_separation: 2.0,
+            max_order: 8,
+        }
+    }
+
+    /// Analyze a constellation.
+    pub fn analyze(&self, constellation: &crate::types::Constellation) -> ConstellationAnalysis {
+        let points: Vec<i32> = constellation.iter().copied().collect();
+        let point_count = points.len();
+
+        if point_count < 2 {
+            return ConstellationAnalysis {
+                point_count,
+                min_separation: 0.0,
+                avg_separation: 0.0,
+                separation_quality: 0.0,
+                well_separated: false,
+                recommended_order: 1,
+            };
+        }
+
+        // Compute separations between adjacent points.
+        let mut separations: Vec<f64> = Vec::new();
+        for window in points.windows(2) {
+            separations.push((window[1] - window[0]).abs() as f64);
+        }
+
+        let min_sep = separations.iter().cloned().fold(f64::INFINITY, f64::min);
+        let avg_sep = separations.iter().sum::<f64>() / separations.len() as f64;
+
+        // Separation quality: how well separated relative to minimum reliable.
+        let separation_quality = (min_sep / self.min_reliable_separation).clamp(0.0, 1.0);
+        let well_separated = min_sep >= self.min_reliable_separation;
+
+        // Recommended order based on separation quality.
+        let recommended_order = if separation_quality >= 0.9 {
+            self.max_order.min(8)
+        } else if separation_quality >= 0.7 {
+            4
+        } else if separation_quality >= 0.5 {
+            2
+        } else {
+            1
+        };
+
+        ConstellationAnalysis {
+            point_count,
+            min_separation: min_sep,
+            avg_separation: avg_sep,
+            separation_quality,
+            well_separated,
+            recommended_order,
+        }
+    }
+
+    /// Returns true if the constellation supports reliable k-bit modulation.
+    pub fn supports_order(&self, analysis: &ConstellationAnalysis, order: usize) -> bool {
+        let required_points = 2usize.pow(order as u32);
+        analysis.point_count >= required_points && analysis.well_separated
+    }
+
+    /// Update separation threshold.
+    pub fn update_threshold(&mut self, min_separation: f64) {
+        self.min_reliable_separation = min_separation.max(0.0);
+    }
+}
+
+impl Default for ConstellationAnalyzer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Frequency-domain analysis
+// ---------------------------------------------------------------------------
+
+/// Frequency-domain characteristics of a topological signal.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FrequencyAnalysis {
+    /// Dominant frequency component.
+    pub dominant_frequency: f64,
+    /// Spectral bandwidth.
+    pub bandwidth: f64,
+    /// Spectral centroid.
+    pub spectral_centroid: f64,
+    /// Frequency-domain SNR.
+    pub spectral_snr: f64,
+    /// Whether the signal has a clean spectral signature.
+    pub clean_spectrum: bool,
+}
+
+/// Performs frequency-domain analysis of Stokes fields.
+pub struct FrequencyDomainAnalyzer {
+    /// FFT size for analysis.
+    pub fft_size: usize,
+    /// Frequency resolution.
+    pub frequency_resolution: f64,
+    /// Noise floor estimate in frequency domain.
+    pub noise_floor_db: f64,
+}
+
+impl FrequencyDomainAnalyzer {
+    /// Create a new frequency domain analyzer.
+    pub fn new() -> Self {
+        Self {
+            fft_size: 256,
+            frequency_resolution: 1.0,
+            noise_floor_db: -60.0,
+        }
+    }
+
+    /// Analyze frequency content of a Stokes field.
+    pub fn analyze(&self, field: &[[[f64; 4]; 256]; 256]) -> FrequencyAnalysis {
+        // Compute spatial frequency content via gradient magnitude spectrum.
+        let mut freq_magnitudes = Vec::new();
+
+        for y in 1..255 {
+            for x in 1..255 {
+                let gx = field[y][x + 1][0] - field[y][x - 1][0];
+                let gy = field[y + 1][x][0] - field[y - 1][x][0];
+                let mag = (gx * gx + gy * gy).sqrt();
+                freq_magnitudes.push(mag);
+            }
+        }
+
+        if freq_magnitudes.is_empty() {
+            return FrequencyAnalysis {
+                dominant_frequency: 0.0,
+                bandwidth: 0.0,
+                spectral_centroid: 0.0,
+                spectral_snr: 0.0,
+                clean_spectrum: false,
+            };
+        }
+
+        // Find dominant frequency (peak magnitude location).
+        let max_idx = freq_magnitudes
+            .iter()
+            .enumerate()
+            .max_by(|_, b| b.1.partial_cmp(a.1).unwrap())
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        let dominant_frequency = max_idx as f64 * self.frequency_resolution;
+
+        // Compute bandwidth (spread of significant frequencies).
+        let max_mag = freq_magnitudes.iter().cloned().fold(0.0f64, f64::max);
+        let threshold = max_mag * 0.1;
+        let significant_count = freq_magnitudes.iter().filter(|&&m| m > threshold).count();
+        let bandwidth = significant_count as f64 * self.frequency_resolution;
+
+        // Spectral centroid.
+        let total_mag: f64 = freq_magnitudes.iter().sum();
+        let spectral_centroid = if total_mag > 0.0 {
+            freq_magnitudes
+                .iter()
+                .enumerate()
+                .map(|(i, &m)| i as f64 * m * self.frequency_resolution)
+                .sum::<f64>()
+                / total_mag
+        } else {
+            0.0
+        };
+
+        // Spectral SNR.
+        let signal_power: f64 = freq_magnitudes.iter().map(|m| m * m).sum();
+        let noise_power = self.noise_floor_db.exp() * freq_magnitudes.len() as f64;
+        let spectral_snr = if noise_power > 0.0 {
+            10.0 * (signal_power / noise_power).log10()
+        } else {
+            f64::INFINITY
+        };
+
+        let clean_spectrum = spectral_snr > 20.0 && bandwidth < 50.0;
+
+        FrequencyAnalysis {
+            dominant_frequency,
+            bandwidth,
+            spectral_centroid,
+            spectral_snr,
+            clean_spectrum,
+        }
+    }
+
+    /// Returns true if the frequency signature is suitable for detection.
+    pub fn is_suitable(&self, analysis: &FrequencyAnalysis) -> bool {
+        analysis.clean_spectrum && analysis.spectral_snr > 15.0
+    }
+
+    /// Update FFT size.
+    pub fn update_fft_size(&mut self, size: usize) {
+        self.fft_size = size.max(64);
+    }
+}
+
+impl Default for FrequencyDomainAnalyzer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Multi-resolution analysis
+// ---------------------------------------------------------------------------
+
+/// Analysis result at a single resolution level.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolutionLevelResult {
+    /// Resolution level (0 = finest).
+    pub level: usize,
+    /// Skyrmion number at this level.
+    pub skyrmion_number: i32,
+    /// Confidence at this level.
+    pub confidence: f64,
+    /// Processing time in microseconds.
+    pub processing_time_us: f64,
+}
+
+/// Multi-resolution analysis result.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MultiResolutionAnalysis {
+    /// Results per resolution level.
+    pub level_results: Vec<ResolutionLevelResult>,
+    /// Consensus skyrmion number across levels.
+    pub consensus_number: i32,
+    /// Consensus confidence.
+    pub consensus_confidence: f64,
+    /// Whether all levels agree.
+    pub level_agreement: bool,
+}
+
+/// Performs multi-resolution skyrmion analysis.
+pub struct MultiResolutionAnalyzer {
+    /// Number of resolution levels.
+    pub num_levels: usize,
+    /// Downsampling factor between levels.
+    pub downsample_factor: usize,
+    /// Minimum confidence for level agreement.
+    pub min_agreement_confidence: f64,
+}
+
+impl MultiResolutionAnalyzer {
+    /// Create a new multi-resolution analyzer.
+    pub fn new() -> Self {
+        Self {
+            num_levels: 3,
+            downsample_factor: 2,
+            min_agreement_confidence: 0.7,
+        }
+    }
+
+    /// Analyze a field at multiple resolutions.
+    pub fn analyze(
+        &self,
+        field: &[[[f64; 4]; 256]; 256],
+    ) -> MultiResolutionAnalysis {
+        let mut level_results = Vec::with_capacity(self.num_levels);
+        let mut computer = SkyrmionComputer::new();
+
+        for level in 0..self.num_levels {
+            let start = lib_ms();
+            let scale = self.downsample_factor.pow(level as u32) as f64;
+
+            // Downsample field.
+            let downsampled = self.downsample_field(field, scale);
+
+            // Compute skyrmion number.
+            let result = computer.compute(&downsampled).unwrap_or_else(|_| {
+                SkyrmionComputationResult {
+                    skyrmion_number: SkyrmionNumber::default(),
+                    field: SkyrmionField::default(),
+                    compute_time_us: 0.0,
+                    iterations: 0,
+                    converged: false,
+                }
+            });
+
+            level_results.push(ResolutionLevelResult {
+                level,
+                skyrmion_number: result.skyrmion_number.value,
+                confidence: if result.skyrmion_number.precision < 0.1 {
+                    0.9
+                } else {
+                    0.5
+                },
+                processing_time_us: (lib_ms() - start) as f64,
+            });
+        }
+
+        // Compute consensus.
+        let consensus_number = self.compute_consensus(&level_results);
+        let consensus_confidence = level_results
+            .iter()
+            .map(|r| r.confidence)
+            .sum::<f64>()
+            / level_results.len() as f64;
+
+        // Check agreement.
+        let level_agreement = level_results
+            .iter()
+            .all(|r| r.skyrmion_number == consensus_number);
+
+        MultiResolutionAnalysis {
+            level_results,
+            consensus_number,
+            consensus_confidence,
+            level_agreement,
+        }
+    }
+
+    fn downsample_field(
+        &self,
+        field: &[[[f64; 4]; 256]; 256],
+        scale: f64,
+    ) -> [[[f64; 4]; 256]; 256] {
+        let mut result = [[[0.0f64; 4]; 256]; 256];
+        let inv_scale = 1.0 / scale;
+
+        for y in 0..256 {
+            for x in 0..256 {
+                let src_y = (y as f64 * inv_scale) as usize;
+                let src_x = (x as f64 * inv_scale) as usize;
+                if src_y < 256 && src_x < 256 {
+                    result[y][x] = field[src_y][src_x];
+                }
+            }
+        }
+        result
+    }
+
+    fn compute_consensus(&self, results: &[ResolutionLevelResult]) -> i32 {
+        if results.is_empty() {
+            return 0;
+        }
+
+        // Vote for most common skyrmion number.
+        let mut counts: std::collections::HashMap<i32, u32> = std::collections::HashMap::new();
+        for r in results {
+            *counts.entry(r.skyrmion_number).or_insert(0) += 1;
+        }
+
+        counts
+            .into_iter()
+            .max_by_key(|_, &v| v)
+            .map(|(k, _)| k)
+            .unwrap_or(0)
+    }
+
+    /// Returns true if multi-resolution analysis is reliable.
+    pub fn is_reliable(&self, analysis: &MultiResolutionAnalysis) -> bool {
+        analysis.level_agreement && analysis.consensus_confidence >= self.min_agreement_confidence
+    }
+
+    /// Update number of levels.
+    pub fn update_levels(&mut self, num_levels: usize) {
+        self.num_levels = num_levels.max(1).min(8);
+    }
+}
+
+impl Default for MultiResolutionAnalyzer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Temporal filtering
+// ---------------------------------------------------------------------------
+
+/// A filtered detection over time.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FilteredDetection {
+    /// Filtered skyrmion number.
+    pub skyrmion_number: i32,
+    /// Filtered confidence.
+    pub confidence: f64,
+    /// Number of frames contributing to filter.
+    pub frame_count: u32,
+    /// Filter stability (0.0 to 1.0).
+    pub stability: f64,
+}
+
+/// Temporal filter for smoothing detection results over time.
+pub struct TemporalFilter {
+    /// Filter window size.
+    pub window_size: usize,
+    /// Smoothing factor (0.0 = no smoothing, 1.0 = heavy smoothing).
+    pub smoothing_factor: f64,
+    /// History of detections.
+    pub history: Vec<DetectionOutcome>,
+    /// Maximum history length.
+    pub max_history: usize,
+}
+
+impl TemporalFilter {
+    /// Create a new temporal filter.
+    pub fn new() -> Self {
+        Self {
+            window_size: 5,
+            smoothing_factor: 0.3,
+            history: Vec::with_capacity(100),
+            max_history: 100,
+        }
+    }
+
+    /// Filter a new detection outcome.
+    pub fn filter(&mut self, outcome: DetectionOutcome) -> FilteredDetection {
+        if let DetectionOutcome::Signal {
+            signal,
+            skyrmion_number_computed: _,
+            constellation_point: _,
+            confidence,
+        } = outcome
+        {
+            self.history.push(outcome.clone());
+            if self.history.len() > self.max_history {
+                self.history.remove(0);
+            }
+
+            // Collect skyrmion numbers from recent signal detections.
+            let skyrmion_numbers: Vec<i32> = self
+                .history
+                .iter()
+                .filter_map(|o| match o {
+                    DetectionOutcome::Signal {
+                        signal,
+                        ..
+                    } => Some(signal.skyrmion_number),
+                    _ => None,
+                })
+                .collect();
+
+            let filtered_q = if skyrmion_numbers.is_empty() {
+                signal.skyrmion_number
+            } else {
+                // Mode of recent skyrmion numbers.
+                let mut counts: std::collections::HashMap<i32, u32> =
+                    std::collections::HashMap::new();
+                for &q in &skyrmion_numbers {
+                    *counts.entry(q).or_insert(0) += 1;
+                }
+                counts
+                    .into_iter()
+                    .max_by_key(|_, &v| v)
+                    .map(|(k, _)| k)
+                    .unwrap_or(signal.skyrmion_number)
+            };
+
+            let filtered_confidence = confidence
+                * (1.0 - self.smoothing_factor)
+                + self.smoothing_factor
+                    * (skyrmion_numbers.iter().map(|_| 1.0f64).sum::<f64>()
+                        / (skyrmion_numbers.len() as f64))
+                    .clamp(0.0, 1.0);
+
+            let stability = skyrmion_numbers.iter().filter(|&&q| q == filtered_q).count() as f64
+                / skyrmion_numbers.len() as f64;
+
+            FilteredDetection {
+                skyrmion_number: filtered_q,
+                confidence: filtered_confidence.clamp(0.0, 1.0),
+                frame_count: skyrmion_numbers.len() as u32,
+                stability,
+            }
+        } else {
+            // Non-signal outcome: push to history but return low-confidence filter.
+            self.history.push(outcome);
+            if self.history.len() > self.max_history {
+                self.history.remove(0);
+            }
+            FilteredDetection {
+                skyrmion_number: 0,
+                confidence: 0.0,
+                frame_count: self.history.len() as u32,
+                stability: 0.0,
+            }
+        }
+    }
+
+    /// Returns the number of recent signal detections.
+    pub fn recent_signal_count(&self) -> u32 {
+        self.history
+            .iter()
+            .filter(|o| matches!(o, DetectionOutcome::Signal { .. }))
+            .count() as u32
+    }
+
+    /// Reset the filter history.
+    pub fn reset(&mut self) {
+        self.history.clear();
+    }
+
+    /// Update filter parameters.
+    pub fn update_params(&mut self, window_size: usize, smoothing_factor: f64) {
+        self.window_size = window_size.max(1);
+        self.smoothing_factor = smoothing_factor.clamp(0.0, 1.0);
+    }
+}
+
+impl Default for TemporalFilter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Detection confidence calibration
+// ---------------------------------------------------------------------------
+
+/// Calibrates detection confidence based on historical performance.
+pub struct DetectionConfidenceCalibrator {
+    /// Calibration bins.
+    bins: Vec<CalibrationEntry>,
+    /// Number of bins.
+    pub num_bins: usize,
+}
+
+/// A single calibration entry.
+#[derive(Debug, Clone, Default)]
+struct CalibrationEntry {
+    /// Lower confidence bound.
+    pub lower: f64,
+    /// Upper confidence bound.
+    pub upper: f64,
+    /// Number of predictions.
+    pub count: u32,
+    /// Number of correct predictions.
+    pub correct: u32,
+}
+
+impl DetectionConfidenceCalibrator {
+    /// Create a new calibrator.
+    pub fn new(num_bins: usize) -> Self {
+        Self {
+            bins: (0..num_bins)
+                .map(|i| CalibrationEntry {
+                    lower: i as f64 / num_bins as f64,
+                    upper: (i + 1) as f64 / num_bins as f64,
+                    count: 0,
+                    correct: 0,
+                })
+                .collect(),
+            num_bins,
+        }
+    }
+
+    /// Record a detection result for calibration.
+    pub fn record(&mut self, predicted_confidence: f64, was_correct: bool) {
+        let bin_idx = ((predicted_confidence.clamp(0.0, 1.0)) * self.num_bins as f64) as usize;
+        let bin_idx = bin_idx.min(self.num_bins - 1);
+        if let Some(bin) = self.bins.get_mut(bin_idx) {
+            bin.count += 1;
+            if was_correct {
+                bin.correct += 1;
+            }
+        }
+    }
+
+    /// Calibrate a raw confidence value.
+    pub fn calibrate(&self, raw_confidence: f64) -> f64 {
+        let bin_idx = ((raw_confidence.clamp(0.0, 1.0)) * self.num_bins as f64) as usize;
+        let bin_idx = bin_idx.min(self.num_bins - 1);
+        let bin = &self.bins[bin_idx];
+        if bin.count > 0 {
+            bin.correct as f64 / bin.count as f64
+        } else {
+            raw_confidence
+        }
+    }
+
+    /// Returns the expected calibration error.
+    pub fn ece(&self) -> f64 {
+        let total: u32 = self.bins.iter().map(|b| b.count).sum();
+        if total == 0 {
+            return 0.0;
+        }
+        self.bins
+            .iter()
+            .map(|b| {
+                if b.count == 0 {
+                    0.0
+                } else {
+                    let accuracy = b.correct as f64 / b.count as f64;
+                    let conf = (b.lower + b.upper) / 2.0;
+                    (b.count as f64 / total as f64) * (accuracy - conf).abs()
+                }
+            })
+            .sum()
+    }
+}
+
+impl Default for DetectionConfidenceCalibrator {
+    fn default() -> Self {
+        Self::new(10)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DetectionPipeline tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn detection_pipeline_new() {
+    let pipeline = DetectionPipeline::new();
+    assert_eq!(pipeline.stats().total_detections, 0);
+    assert_eq!(pipeline.stats().successful_detections, 0);
+    assert_eq!(pipeline.stats().failed_detections, 0);
+    assert!(pipeline.continue_on_failure);
+}
+
+#[test]
+fn detection_pipeline_run_uniform_field() {
+    let mut pipeline = DetectionPipeline::new();
+    let mut detector = SignalDetector::default();
+    let mut field = [[[0.0f64; 4]; 256]; 256];
+    for y in 0..256 {
+        for x in 0..256 {
+            field[y][x] = [1.0, 0.0, 0.0, 0.0];
+        }
+    }
+    let result = pipeline.run(&mut detector, &field);
+    assert!(result.success);
+    assert_eq!(result.stage_results.len(), 6);
+    assert!(result.all_stages_succeeded());
+}
+
+#[test]
+fn detection_pipeline_stats_tracking() {
+    let mut pipeline = DetectionPipeline::new();
+    let mut detector = SignalDetector::default();
+    let mut field = [[[0.0f64; 4]; 256]; 256];
+    for y in 0..256 {
+        for x in 0..256 {
+            field[y][x] = [1.0, 0.0, 0.0, 0.0];
+        }
+    }
+    let _ = pipeline.run(&mut detector, &field);
+    let stats = pipeline.stats();
+    assert_eq!(stats.total_detections, 1);
+    assert_eq!(stats.successful_detections, 1);
+    assert_eq!(stats.failed_detections, 0);
+    assert!(stats.avg_processing_time_us > 0.0);
+}
+
+#[test]
+fn detection_pipeline_continue_on_failure() {
+    let mut pipeline = DetectionPipeline::new();
+    pipeline.continue_on_failure = true;
+    assert!(pipeline.continue_on_failure);
+    pipeline.continue_on_failure = false;
+    assert!(!pipeline.continue_on_failure);
+}
+
+#[test]
+fn detection_pipeline_stage_config() {
+    let mut pipeline = DetectionPipeline::new();
+    assert!(pipeline.stage_config(DetectionStage::Preprocessing).is_some());
+    let config = pipeline.stage_config(DetectionStage::Preprocessing).unwrap();
+    assert!(config.enabled);
+    assert_eq!(config.timeout_ms, 1000);
+}
+
+#[test]
+fn detection_pipeline_update_stage_config() {
+    let mut pipeline = DetectionPipeline::new();
+    let new_config = StageConfig {
+        enabled: false,
+        timeout_ms: 500,
+        retry_count: 1,
+        quality_threshold: 0.8,
+    };
+    pipeline.update_stage_config(DetectionStage::Preprocessing, new_config.clone());
+    let updated = pipeline.stage_config(DetectionStage::Preprocessing).unwrap();
+    assert!(!updated.enabled);
+    assert_eq!(updated.timeout_ms, 500);
+    assert_eq!(updated.retry_count, 1);
+    assert_eq!(updated.quality_threshold, 0.8);
+}
+
+#[test]
+fn detection_pipeline_set_stage_enabled() {
+    let mut pipeline = DetectionPipeline::new();
+    pipeline.set_stage_enabled(DetectionStage::Preprocessing, false);
+    assert!(!pipeline.stage_config(DetectionStage::Preprocessing).unwrap().enabled);
+    pipeline.set_stage_enabled(DetectionStage::Preprocessing, true);
+    assert!(pipeline.stage_config(DetectionStage::Preprocessing).unwrap().enabled);
+}
+
+#[test]
+fn detection_pipeline_reset_stats() {
+    let mut pipeline = DetectionPipeline::new();
+    let mut detector = SignalDetector::default();
+    let mut field = [[[0.0f64; 4]; 256]; 256];
+    for y in 0..256 {
+        for x in 0..256 {
+            field[y][x] = [1.0, 0.0, 0.0, 0.0];
+        }
+    }
+    let _ = pipeline.run(&mut detector, &field);
+    assert_eq!(pipeline.stats().total_detections, 1);
+    pipeline.reset_stats();
+    assert_eq!(pipeline.stats().total_detections, 0);
+    assert_eq!(pipeline.stats().successful_detections, 0);
+}
+
+// ---------------------------------------------------------------------------
+// SignalQualityAssessment tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn signal_quality_assessment_new() {
+    let assessment = SignalQualityAssessment::new(0.9, 0.8, 0.7, 0.6, 0.5, 0.4);
+    assert!((assessment.overall_score - 0.715).abs() < 0.001);
+    assert!(assessment.passes_gate);
+    assert!(assessment.is_high_quality());
+}
+
+#[test]
+fn signal_quality_assessment_low_quality() {
+    let assessment = SignalQualityAssessment::new(0.1, 0.1, 0.1, 0.1, 0.1, 0.1);
+    assert!(!assessment.passes_gate);
+    assert!(!assessment.is_high_quality());
+    assert_eq!(assessment.grade, QualityGrade::F);
+}
+
+#[test]
+fn signal_quality_assessment_grade_a() {
+    let assessment = SignalQualityAssessment::new(0.95, 0.95, 0.95, 0.95, 0.95, 0.95);
+    assert_eq!(assessment.grade, QualityGrade::A);
+    assert!(assessment.is_high_quality());
+}
+
+#[test]
+fn signal_quality_assessment_grade_f() {
+    let assessment = SignalQualityAssessment::new(0.1, 0.1, 0.1, 0.1, 0.1, 0.1);
+    assert_eq!(assessment.grade, QualityGrade::F);
+    assert!(!assessment.is_high_quality());
+}
+
+#[test]
+fn signal_quality_assessment_bottleneck() {
+    let assessment = SignalQualityAssessment::new(0.3, 0.9, 0.9, 0.9, 0.9, 0.9);
+    assert!((assessment.bottleneck() - 0.3).abs() < 0.001);
+}
+
+#[test]
+fn quality_assessor_default() {
+    let assessor = QualityAssessor::default();
+    assert!((assessor.min_overall_score - 0.6).abs() < 0.001);
+    assert!((assessor.min_topological_stability - 0.7).abs() < 0.001);
+    assert!((assessor.min_snr_quality - 0.5).abs() < 0.001);
+    assert!(assessor.use_temporal_stability);
+}
+
+#[test]
+fn quality_assessor_assess_signal() {
+    let assessor = QualityAssessor::default();
+    let outcome = DetectionOutcome::Signal {
+        signal: TopologicalSignal::new(3).with_confidence(0.9),
+        skyrmion_number_computed: 3.0,
+        constellation_point: 3,
+        confidence: 0.9,
+    };
+    let assessment = assessor.assess(&outcome).unwrap();
+    assert!(assessment.passes_gate);
+    assert!(assessment.is_high_quality());
+}
+
+#[test]
+fn quality_assessor_assess_noise() {
+    let assessor = QualityAssessor::default();
+    let outcome = DetectionOutcome::Noise {
+        noise_floor: 0.1,
+        max_skyrmion_density: 0.01,
+    };
+    let assessment = assessor.assess(&outcome).unwrap();
+    assert!(!assessment.passes_gate);
+    assert!(!assessment.is_high_quality());
+}
+
+#[test]
+fn quality_assessor_assess_interference() {
+    let assessor = QualityAssessor::default();
+    let outcome = DetectionOutcome::Interference {
+        interference_type: "test".into(),
+        severity: 0.8,
+    };
+    let assessment = assessor.assess(&outcome).unwrap();
+    assert!(!assessment.passes_gate);
+}
+
+#[test]
+fn quality_assessor_assess_false_positive() {
+    let assessor = QualityAssessor::default();
+    let outcome = DetectionOutcome::FalsePositive {
+        q_candidate: 5,
+        reason: "test".into(),
+    };
+    let assessment = assessor.assess(&outcome).unwrap();
+    assert!(!assessment.passes_gate);
+}
+
+#[test]
+fn quality_assessor_update_thresholds() {
+    let mut assessor = QualityAssessor::default();
+    assessor.update_thresholds(0.8, 0.8, 0.8);
+    assert!((assessor.min_overall_score - 0.8).abs() < 0.001);
+    assert!((assessor.min_topological_stability - 0.8).abs() < 0.001);
+    assert!((assessor.min_snr_quality - 0.8).abs() < 0.001);
+}
+
+// ---------------------------------------------------------------------------
+// ConstellationAnalyzer tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn constellation_analyzer_default() {
+    let analyzer = ConstellationAnalyzer::default();
+    assert!((analyzer.min_reliable_separation - 2.0).abs() < 0.001);
+    assert_eq!(analyzer.max_order, 8);
+}
+
+#[test]
+fn constellation_analyzer_binary() {
+    let analyzer = ConstellationAnalyzer::default();
+    let constellation = Constellation::binary().unwrap();
+    let analysis = analyzer.analyze(&constellation);
+    assert_eq!(analysis.point_count, 2);
+    assert_eq!(analysis.min_separation, 2.0);
+    assert_eq!(analysis.avg_separation, 2.0);
+    assert!(analysis.well_separated);
+    assert_eq!(analysis.recommended_order, 1);
+}
+
+#[test]
+fn constellation_analyzer_quaternary() {
+    let analyzer = ConstellationAnalyzer::default();
+    let constellation = Constellation::quaternary().unwrap();
+    let analysis = analyzer.analyze(&constellation);
+    assert_eq!(analysis.point_count, 4);
+    assert_eq!(analysis.min_separation, 2.0);
+    assert!(analysis.well_separated);
+    assert_eq!(analysis.recommended_order, 2);
+}
+
+#[test]
+fn constellation_analyzer_octal() {
+    let analyzer = ConstellationAnalyzer::default();
+    let constellation = Constellation::octal().unwrap();
+    let analysis = analyzer.analyze(&constellation);
+    assert_eq!(analysis.point_count, 8);
+    assert_eq!(analysis.min_separation, 2.0);
+    assert!(analysis.well_separated);
+    assert_eq!(analysis.recommended_order, 3);
+}
+
+#[test]
+fn constellation_analyzer_close_points() {
+    let analyzer = ConstellationAnalyzer::default();
+    let constellation = Constellation::new(vec![0, 1, 2]).unwrap();
+    let analysis = analyzer.analyze(&constellation);
+    assert_eq!(analysis.min_separation, 1.0);
+    assert!(!analysis.well_separated);
+    assert_eq!(analysis.recommended_order, 1);
+}
+
+#[test]
+fn constellation_analyzer_supports_order() {
+    let analyzer = ConstellationAnalyzer::default();
+    let constellation = Constellation::octal().unwrap();
+    let analysis = analyzer.analyze(&constellation);
+    assert!(analyzer.supports_order(&analysis, 1));
+    assert!(analyzer.supports_order(&analysis, 2));
+    assert!(analyzer.supports_order(&analysis, 3));
+}
+
+#[test]
+fn constellation_analyzer_update_threshold() {
+    let mut analyzer = ConstellationAnalyzer::default();
+    analyzer.update_threshold(5.0);
+    assert!((analyzer.min_reliable_separation - 5.0).abs() < 0.001);
+    analyzer.update_threshold(0.0);
+    assert!((analyzer.min_reliable_separation - 0.0).abs() < 0.001);
+}
+
+// ---------------------------------------------------------------------------
+// FrequencyDomainAnalyzer tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn frequency_domain_analyzer_default() {
+    let analyzer = FrequencyDomainAnalyzer::default();
+    assert_eq!(analyzer.fft_size, 256);
+    assert!((analyzer.frequency_resolution - 1.0).abs() < 0.001);
+}
+
+#[test]
+fn frequency_domain_analyzer_uniform_field() {
+    let analyzer = FrequencyDomainAnalyzer::default();
+    let mut field = [[[0.0f64; 4]; 256]; 256];
+    for y in 0..256 {
+        for x in 0..256 {
+            field[y][x] = [1.0, 0.0, 0.0, 0.0];
+        }
+    }
+    let result = analyzer.analyze(&field);
+    assert_eq!(result.dominant_frequency, 0.0);
+    assert_eq!(result.bandwidth, 0.0);
+}
+
+#[test]
+fn frequency_domain_analyzer_varying_field() {
+    let analyzer = FrequencyDomainAnalyzer::default();
+    let mut field = [[[0.0f64; 4]; 256]; 256];
+    for y in 0..256 {
+        for x in 0..256 {
+            field[y][x] = [(x as f64), 0.0, 0.0, 0.0];
+        }
+    }
+    let result = analyzer.analyze(&field);
+    assert!(result.dominant_frequency >= 0.0);
+    assert!(result.spectral_centroid >= 0.0);
+}
+
+#[test]
+fn frequency_domain_analyzer_is_suitable() {
+    let analyzer = FrequencyDomainAnalyzer::default();
+    let analysis = FrequencyAnalysis {
+        dominant_frequency: 10.0,
+        bandwidth: 10.0,
+        spectral_centroid: 10.0,
+        spectral_snr: 25.0,
+        clean_spectrum: true,
+    };
+    assert!(analyzer.is_suitable(&analysis));
+
+    let analysis2 = FrequencyAnalysis {
+        dominant_frequency: 10.0,
+        bandwidth: 10.0,
+        spectral_centroid: 10.0,
+        spectral_snr: 5.0,
+        clean_spectrum: true,
+    };
+    assert!(!analyzer.is_suitable(&analysis2));
+}
+
+#[test]
+fn frequency_domain_analyzer_update_fft_size() {
+    let mut analyzer = FrequencyDomainAnalyzer::default();
+    analyzer.update_fft_size(512);
+    assert_eq!(analyzer.fft_size, 512);
+    analyzer.update_fft_size(10);
+    assert_eq!(analyzer.fft_size, 64); // minimum enforced
+}
+
+// ---------------------------------------------------------------------------
+// MultiResolutionAnalyzer tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn multi_resolution_analyzer_default() {
+    let analyzer = MultiResolutionAnalyzer::default();
+    assert_eq!(analyzer.num_levels, 3);
+    assert_eq!(analyzer.downsample_factor, 2);
+}
+
+#[test]
+fn multi_resolution_analyzer_uniform_field() {
+    let analyzer = MultiResolutionAnalyzer::default();
+    let mut field = [[[0.0f64; 4]; 256]; 256];
+    for y in 0..256 {
+        for x in 0..256 {
+            field[y][x] = [1.0, 0.0, 0.0, 0.0];
+        }
+    }
+    let result = analyzer.analyze(&field);
+    assert_eq!(result.level_results.len(), 3);
+    assert_eq!(result.consensus_number, 0);
+    assert!(result.level_agreement);
+}
+
+#[test]
+fn multi_resolution_analyzer_level_agreement() {
+    let analyzer = MultiResolutionAnalyzer::default();
+    let mut field = [[[0.0f64; 4]; 256]; 256];
+    for y in 0..256 {
+        for x in 0..256 {
+            field[y][x] = [1.0, 0.0, 0.0, 0.0];
+        }
+    }
+    let result = analyzer.analyze(&field);
+    assert!(analyzer.is_reliable(&result));
+}
+
+#[test]
+fn multi_resolution_analyzer_update_levels() {
+    let mut analyzer = MultiResolutionAnalyzer::default();
+    analyzer.update_levels(5);
+    assert_eq!(analyzer.num_levels, 5);
+    analyzer.update_levels(1);
+    assert_eq!(analyzer.num_levels, 1);
+    analyzer.update_levels(100);
+    assert_eq!(analyzer.num_levels, 8); // max enforced
+}
+
+// ---------------------------------------------------------------------------
+// TemporalFilter tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn temporal_filter_default() {
+    let filter = TemporalFilter::default();
+    assert_eq!(filter.window_size, 5);
+    assert!((filter.smoothing_factor - 0.3).abs() < 0.001);
+}
+
+#[test]
+fn temporal_filter_signal_detection() {
+    let mut filter = TemporalFilter::default();
+    let outcome = DetectionOutcome::Signal {
+        signal: TopologicalSignal::new(1).with_confidence(0.9),
+        skyrmion_number_computed: 1.0,
+        constellation_point: 1,
+        confidence: 0.9,
+    };
+    let result = filter.filter(outcome);
+    assert_eq!(result.skyrmion_number, 1);
+    assert!(result.confidence > 0.0);
+    assert_eq!(result.frame_count, 1);
+}
+
+#[test]
+fn temporal_filter_noise_detection() {
+    let mut filter = TemporalFilter::default();
+    let outcome = DetectionOutcome::Noise {
+        noise_floor: 0.1,
+        max_skyrmion_density: 0.01,
+    };
+    let result = filter.filter(outcome);
+    assert_eq!(result.skyrmion_number, 0);
+    assert_eq!(result.confidence, 0.0);
+}
+
+#[test]
+fn temporal_filter_stability() {
+    let mut filter = TemporalFilter::default();
+    // Send multiple detections with same skyrmion number.
+    for _ in 0..5 {
+        let outcome = DetectionOutcome::Signal {
+            signal: TopologicalSignal::new(3).with_confidence(0.9),
+            skyrmion_number_computed: 3.0,
+            constellation_point: 3,
+            confidence: 0.9,
+        };
+        let result = filter.filter(outcome);
+        assert_eq!(result.skyrmion_number, 3);
+    }
+    assert!(filter.recent_signal_count() > 0);
+}
+
+#[test]
+fn temporal_filter_reset() {
+    let mut filter = TemporalFilter::default();
+    let outcome = DetectionOutcome::Signal {
+        signal: TopologicalSignal::new(1).with_confidence(0.9),
+        skyrmion_number_computed: 1.0,
+        constellation_point: 1,
+        confidence: 0.9,
+    };
+    filter.filter(outcome);
+    assert_eq!(filter.recent_signal_count(), 1);
+    filter.reset();
+    assert_eq!(filter.recent_signal_count(), 0);
+}
+
+#[test]
+fn temporal_filter_update_params() {
+    let mut filter = TemporalFilter::default();
+    filter.update_params(10, 0.5);
+    assert_eq!(filter.window_size, 10);
+    assert!((filter.smoothing_factor - 0.5).abs() < 0.001);
+    filter.update_params(1, 0.0);
+    assert_eq!(filter.window_size, 1);
+}
+
+// ---------------------------------------------------------------------------
+// DetectionConfidenceCalibrator tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn confidence_calibrator_default() {
+    let calibrator = DetectionConfidenceCalibrator::default();
+    assert_eq!(calibrator.num_bins, 10);
+    assert_eq!(calibrator.ece(), 0.0);
+}
+
+#[test]
+fn confidence_calibrator_record() {
+    let mut calibrator = DetectionConfidenceCalibrator::new(5);
+    calibrator.record(0.8, true);
+    calibrator.record(0.8, true);
+    calibrator.record(0.8, false);
+    let calibrated = calibrator.calibrate(0.8);
+    assert!((calibrated - 0.666667).abs() < 0.01);
+}
+
+#[test]
+fn confidence_calibrator_ece() {
+    let mut calibrator = DetectionConfidenceCalibrator::new(2);
+    // Perfect calibration: all predictions in bin 0 are correct, all in bin 1 are correct.
+    calibrator.record(0.1, true);
+    calibrator.record(0.9, true);
+    let ece = calibrator.ece();
+    assert!(ece < 0.1);
+}
+
+#[test]
+fn confidence_calibrator_no_records() {
+    let calibrator = DetectionConfidenceCalibrator::new(5);
+    let calibrated = calibrator.calibrate(0.5);
+    assert!((calibrated - 0.5).abs() < 0.001);
+    assert_eq!(calibrator.ece(), 0.0);
+}
+
+// ---------------------------------------------------------------------------
+// PipelineResult tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pipeline_result_avg_quality() {
+    let result = PipelineResult {
+        success: true,
+        stage_results: vec![
+            StageResult::success(DetectionStage::Preprocessing, 10.0, 0.8),
+            StageResult::success(DetectionStage::IntensityMasking, 20.0, 0.9),
+            StageResult::failure(DetectionStage::SkyrmionComputation, 5.0, "test error".into()),
+        ],
+        total_processing_time_us: 35.0,
+        timestamp: 1000,
+    };
+    assert!((result.avg_quality() - (0.8 + 0.9 + 0.0) / 3.0).abs() < 0.001);
+    assert!(!result.all_stages_succeeded());
+    assert_eq!(result.first_error(), Some("test error"));
+}
+
+#[test]
+fn pipeline_result_all_success() {
+    let result = PipelineResult {
+        success: true,
+        stage_results: vec![
+            StageResult::success(DetectionStage::Preprocessing, 10.0, 0.8),
+            StageResult::success(DetectionStage::IntensityMasking, 20.0, 0.9),
+        ],
+        total_processing_time_us: 30.0,
+        timestamp: 1000,
+    };
+    assert!(result.all_stages_succeeded());
+    assert_eq!(result.first_error(), None);
+}
+
+#[test]
+fn stage_result_success_failure() {
+    let success = StageResult::success(DetectionStage::Preprocessing, 10.0, 0.8);
+    assert!(success.success);
+    assert_eq!(success.quality_score, 0.8);
+    assert!(success.error.is_none());
+
+    let failure = StageResult::failure(DetectionStage::SkyrmionComputation, 5.0, "compute failed".into());
+    assert!(!failure.success);
+    assert_eq!(failure.error.as_deref(), Some("compute failed"));
+}
+
+#[test]
+fn stage_config_default() {
+    let config = StageConfig::default();
+    assert!(config.enabled);
+    assert_eq!(config.timeout_ms, 1000);
+    assert_eq!(config.retry_count, 3);
+    assert!((config.quality_threshold - 0.5).abs() < 0.001);
+}
+
+#[test]
+fn pipeline_stats_default() {
+    let stats = PipelineStats::default();
+    assert_eq!(stats.total_detections, 0);
+    assert_eq!(stats.successful_detections, 0);
+    assert_eq!(stats.failed_detections, 0);
+    assert_eq!(stats.avg_processing_time_us, 0.0);
+}
+
+// ---------------------------------------------------------------------------
+// MultiResolutionAnalyzer additional tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn multi_resolution_analyzer_consensus() {
+    let analyzer = MultiResolutionAnalyzer::default();
+    let mut field = [[[0.0f64; 4]; 256]; 256];
+    for y in 0..256 {
+        for x in 0..256 {
+            field[y][x] = [1.0, 0.0, 0.0, 0.0];
+        }
+    }
+    let result = analyzer.analyze(&field);
+    assert_eq!(result.consensus_number, 0);
+    assert!(result.consensus_confidence > 0.0);
+}
+
+#[test]
+fn multi_resolution_analyzer_different_levels() {
+    let analyzer = MultiResolutionAnalyzer::new(5);
+    let mut field = [[[0.0f64; 4]; 256]; 256];
+    for y in 0..256 {
+        for x in 0..256 {
+            field[y][x] = [1.0, 0.0, 0.0, 0.0];
+        }
+    }
+    let result = analyzer.analyze(&field);
+    assert_eq!(result.level_results.len(), 5);
+}
+
+#[test]
+fn frequency_analyzer_clean_spectrum() {
+    let analyzer = FrequencyDomainAnalyzer::default();
+    let analysis = FrequencyAnalysis {
+        dominant_frequency: 5.0,
+        bandwidth: 5.0,
+        spectral_centroid: 5.0,
+        spectral_snr: 30.0,
+        clean_spectrum: true,
+    };
+    assert!(analyzer.is_suitable(&analysis));
+
+    let analysis2 = FrequencyAnalysis {
+        dominant_frequency: 5.0,
+        bandwidth: 100.0,
+        spectral_centroid: 5.0,
+        spectral_snr: 30.0,
+        clean_spectrum: false,
+    };
+    assert!(!analyzer.is_suitable(&analysis2));
+}
+
+#[test]
+fn constellation_analysis_recommended_order_edge() {
+    let analyzer = ConstellationAnalyzer::new();
+    let constellation = Constellation::new(vec![0, 100]).unwrap();
+    let analysis = analyzer.analyze(&constellation);
+    assert_eq!(analysis.min_separation, 100.0);
+    assert!(analysis.well_separated);
+    assert_eq!(analysis.recommended_order, 8); // capped at max_order
+}
+
+#[test]
+fn quality_components_all_fields() {
+    let components = QualityComponents {
+        topological_stability: 0.9,
+        snr_quality: 0.8,
+        spatial_coherence: 0.7,
+        temporal_stability: 0.6,
+        intensity_reliability: 0.5,
+        classification_confidence: 0.4,
+    };
+    assert!((components.topological_stability - 0.9).abs() < 0.001);
+    assert!((components.snr_quality - 0.8).abs() < 0.001);
+    assert!((components.spatial_coherence - 0.7).abs() < 0.001);
+    assert!((components.temporal_stability - 0.6).abs() < 0.001);
+    assert!((components.intensity_reliability - 0.5).abs() < 0.001);
+    assert!((components.classification_confidence - 0.4).abs() < 0.001);
+}
+
+#[test]
+fn filtered_detection_default_fields() {
+    let detection = FilteredDetection {
+        skyrmion_number: 5,
+        confidence: 0.9,
+        frame_count: 10,
+        stability: 0.8,
+    };
+    assert_eq!(detection.skyrmion_number, 5);
+    assert!((detection.confidence - 0.9).abs() < 0.001);
+    assert_eq!(detection.frame_count, 10);
+    assert!((detection.stability - 0.8).abs() < 0.001);
+}
+
+#[test]
+fn quality_grade_ordering() {
+    assert!(QualityGrade::A as u8 == 0);
+    assert!(QualityGrade::F as u8 == 5);
+}
+
+#[test]
+fn quality_recommendation_variants() {
+    assert_eq!(QualityRecommendation::Accept as u8, 0);
+    assert_eq!(QualityRecommendation::AcceptWithCaution as u8, 1);
+    assert_eq!(QualityRecommendation::Reacquire as u8, 2);
+    assert_eq!(QualityRecommendation::Reject as u8, 3);
+    assert_eq!(QualityRecommendation::ManualReview as u8, 4);
+}
+
+// ---------------------------------------------------------------------------
+// ResolutionLevelResult tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn resolution_level_result_fields() {
+    let result = ResolutionLevelResult {
+        level: 2,
+        skyrmion_number: 3,
+        confidence: 0.85,
+        processing_time_us: 150.0,
+    };
+    assert_eq!(result.level, 2);
+    assert_eq!(result.skyrmion_number, 3);
+    assert!((result.confidence - 0.85).abs() < 0.001);
+    assert!((result.processing_time_us - 150.0).abs() < 0.001);
+}
+
+#[test]
+fn detection_pipeline_multiple_runs() {
+    let mut pipeline = DetectionPipeline::new();
+    let mut detector = SignalDetector::default();
+    let mut field = [[[0.0f64; 4]; 256]; 256];
+    for y in 0..256 {
+        for x in 0..256 {
+            field[y][x] = [1.0, 0.0, 0.0, 0.0];
+        }
+    }
+    for _ in 0..5 {
+        let _ = pipeline.run(&mut detector, &field);
+    }
+    let stats = pipeline.stats();
+    assert_eq!(stats.total_detections, 5);
+    assert_eq!(stats.successful_detections, 5);
+}
+
+#[test]
+fn signal_quality_assessment_clone_debug() {
+    let a = SignalQualityAssessment::new(0.9, 0.8, 0.7, 0.6, 0.5, 0.4);
+    let b = a.clone();
+    assert_eq!(a.overall_score, b.overall_score);
+    let _debug = format!("{:?}", a.grade);
+    let _debug2 = format!("{:?}", a.recommendation);
+}
+
+#[test]
+fn quality_assessor_passes_gate() {
+    let assessor = QualityAssessor::default();
+    let high_quality = SignalQualityAssessment::new(0.9, 0.9, 0.9, 0.9, 0.9, 0.9);
+    assert!(assessor.passes_gate(&high_quality));
+    let low_quality = SignalQualityAssessment::new(0.1, 0.1, 0.1, 0.1, 0.1, 0.1);
+    assert!(!assessor.passes_gate(&low_quality));
+}
+
+#[test]
+fn constellation_analyzer_single_point() {
+    let analyzer = ConstellationAnalyzer::default();
+    let constellation = Constellation::new(vec![5]).unwrap();
+    let analysis = analyzer.analyze(&constellation);
+    assert_eq!(analysis.point_count, 1);
+    assert_eq!(analysis.min_separation, 0.0);
+    assert!(!analysis.well_separated);
+}
+
+#[test]
+fn temporal_filter_mixed_outcomes() {
+    let mut filter = TemporalFilter::default();
+    let signal = DetectionOutcome::Signal {
+        signal: TopologicalSignal::new(1).with_confidence(0.9),
+        skyrmion_number_computed: 1.0,
+        constellation_point: 1,
+        confidence: 0.9,
+    };
+    let noise = DetectionOutcome::Noise {
+        noise_floor: 0.1,
+        max_skyrmion_density: 0.01,
+    };
+    filter.filter(signal);
+    filter.filter(noise);
+    filter.filter(signal);
+    assert_eq!(filter.recent_signal_count(), 2);
+}
+
+#[test]
+fn detection_confidence_calibrator_bin_edges() {
+    let mut calibrator = DetectionConfidenceCalibrator::new(4);
+    calibrator.record(0.0, true);
+    calibrator.record(0.25, true);
+    calibrator.record(0.5, true);
+    calibrator.record(0.75, true);
+    calibrator.record(1.0, true);
+    let ece = calibrator.ece();
+    assert!(ece < 0.2);
+}
+
+#[test]
+fn frequency_analyzer_bandwidth_computation() {
+    let analyzer = FrequencyDomainAnalyzer::default();
+    let mut field = [[[0.0f64; 4]; 256]; 256];
+    // Create a field with a clear frequency pattern.
+    for y in 0..256 {
+        for x in 0..256 {
+            field[y][x] = [(x as f64 / 10.0).sin(), 0.0, 0.0, 0.0];
+        }
+    }
+    let result = analyzer.analyze(&field);
+    assert!(result.dominant_frequency >= 0.0);
+    assert!(result.bandwidth >= 0.0);
+}
+
+#[test]
+fn pipeline_stats_update_on_run() {
+    let mut pipeline = DetectionPipeline::new();
+    let mut detector = SignalDetector::default();
+    let mut field = [[[0.0f64; 4]; 256]; 256];
+    for y in 0..256 {
+        for x in 0..256 {
+            field[y][x] = [0.0, 0.0, 0.0, 0.0];
+        }
+    }
+    let _ = pipeline.run(&mut detector, &field);
+    let stats = pipeline.stats();
+    assert_eq!(stats.total_detections, 1);
+    // All-dark field may fail some stages.
+    assert!(stats.successful_detections + stats.failed_detections == 1);
+}
+
+#[test]
+fn detection_pipeline_custom_config() {
+    let mut configs = std::collections::HashMap::new();
+    configs.insert(
+        DetectionStage::Preprocessing,
+        StageConfig {
+            enabled: false,
+            timeout_ms: 2000,
+            retry_count: 5,
+            quality_threshold: 0.9,
+        },
+    );
+    let pipeline = DetectionPipeline::with_config(configs);
+    assert!(!pipeline.stage_config(DetectionStage::Preprocessing).unwrap().enabled);
+    assert_eq!(pipeline.stage_config(DetectionStage::Preprocessing).unwrap().timeout_ms, 2000);
+}
+
+#[test]
+fn multi_resolution_analyzer_single_level() {
+    let analyzer = MultiResolutionAnalyzer::new(1);
+    let mut field = [[[0.0f64; 4]; 256]; 256];
+    for y in 0..256 {
+        for x in 0..256 {
+            field[y][x] = [1.0, 0.0, 0.0, 0.0];
+        }
+    }
+    let result = analyzer.analyze(&field);
+    assert_eq!(result.level_results.len(), 1);
+    assert!(result.level_agreement);
+}
+
+#[test]
+fn constellation_analyzer_large_separation() {
+    let analyzer = ConstellationAnalyzer::new();
+    let constellation = Constellation::new(vec![-100, 100]).unwrap();
+    let analysis = analyzer.analyze(&constellation);
+    assert_eq!(analysis.min_separation, 200.0);
+    assert!(analysis.well_separated);
+    assert_eq!(analysis.recommended_order, 8);
+}
+
+#[test]
+fn frequency_analyzer_empty_field() {
+    let analyzer = FrequencyDomainAnalyzer::default();
+    let field = [[[0.0f64; 4]; 256]; 256];
+    let result = analyzer.analyze(&field);
+    assert_eq!(result.dominant_frequency, 0.0);
+    assert_eq!(result.clean_spectrum, false);
+}
+
+#[test]
+fn quality_assessor_assess_corrupted() {
+    let assessor = QualityAssessor::default();
+    let outcome = DetectionOutcome::Corrupted {
+        reason: "test".into(),
+        integrity_score: 0.3,
+        partial_q: Some(2),
+    };
+    let assessment = assessor.assess(&outcome).unwrap();
+    assert!(!assessment.passes_gate);
+}
+
+#[test]
+fn quality_assessor_assess_insufficient_data() {
+    let assessor = QualityAssessor::default();
+    let outcome = DetectionOutcome::InsufficientData {
+        missing: "test".into(),
+    };
+    let assessment = assessor.assess(&outcome).unwrap();
+    assert!(!assessment.passes_gate);
+}
+
+#[test]
+fn temporal_filter_empty_history() {
+    let filter = TemporalFilter::default();
+    assert_eq!(filter.recent_signal_count(), 0);
+}
+
+#[test]
+fn detection_confidence_calibrator_record_many() {
+    let mut calibrator = DetectionConfidenceCalibrator::new(10);
+    for i in 0..100 {
+        calibrator.record(i as f64 / 100.0, i % 2 == 0);
+    }
+    let ece = calibrator.ece();
+    assert!(ece >= 0.0);
+    assert!(ece < 1.0);
+}
