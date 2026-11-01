@@ -2386,6 +2386,103 @@ impl Default for CrosstalkFrequencyResponseComputer {
     }
 }
 
+// ============================================================================
+// Crosstalk analysis result type
+// ============================================================================
+
+/// Comprehensive crosstalk analysis result combining matrix, statistics,
+/// spectrum, and quality assessment.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CrosstalkAnalysis {
+    /// Crosstalk matrix.
+    pub matrix: CrosstalkMatrix,
+    /// Crosstalk quality assessment.
+    pub quality: CrosstalkQuality,
+    /// Crosstalk distribution statistics.
+    pub distribution: CrosstalkDistribution,
+    /// Peak crosstalk magnitude.
+    pub peak_magnitude: f64,
+    /// Whether crosstalk is within acceptable limits.
+    pub within_limits: bool,
+    /// Recommended mitigation strategy.
+    pub recommended_strategy: MitigationStrategy,
+}
+
+/// Computes a comprehensive crosstalk analysis from a crosstalk matrix.
+pub struct CrosstalkAnalyzer {
+    /// Maximum acceptable crosstalk level.
+    pub max_acceptable_crosstalk: f64,
+    /// Statistics computer.
+    pub stats: CrosstalkStatistics,
+    /// Quality assessor.
+    pub assessor: CrosstalkQualityAssessor,
+}
+
+impl CrosstalkAnalyzer {
+    /// Create a new crosstalk analyzer.
+    pub fn new(max_acceptable_crosstalk: f64) -> Self {
+        Self {
+            max_acceptable_crosstalk,
+            stats: CrosstalkStatistics::new(),
+            assessor: CrosstalkQualityAssessor::new(),
+        }
+    }
+
+    /// Perform a complete crosstalk analysis.
+    pub fn analyze(&mut self, matrix: &CrosstalkMatrix) -> CrosstalkAnalysis {
+        let quality = self.assessor.assess(matrix);
+        let distribution = self.stats.compute_distribution(matrix);
+        let peak_magnitude = matrix.max_crosstalk();
+        let within_limits = peak_magnitude <= self.max_acceptable_crosstalk;
+
+        let recommended_strategy = if peak_magnitude < 0.05 {
+            MitigationStrategy::Thresholding
+        } else if peak_magnitude < 0.15 {
+            MitigationStrategy::RegularizedInversion
+        } else if peak_magnitude < 0.3 {
+            MitigationStrategy::TruncatedSVD
+        } else {
+            MitigationStrategy::IterativeRefinement
+        };
+
+        CrosstalkAnalysis {
+            matrix: matrix.clone(),
+            quality,
+            distribution,
+            peak_magnitude,
+            within_limits,
+            recommended_strategy,
+        }
+    }
+
+    /// Returns the analysis history (distributions).
+    pub fn distribution_history(&self) -> &[CrosstalkDistribution] {
+        self.stats.history()
+    }
+
+    /// Returns the quality history.
+    pub fn quality_history(&self) -> &[CrosstalkQuality] {
+        self.assessor.history()
+    }
+
+    /// Reset the analyzer.
+    pub fn reset(&mut self) {
+        self.stats.reset();
+        self.assessor.reset();
+    }
+
+    /// Update the maximum acceptable crosstalk.
+    pub fn set_max_acceptable_crosstalk(&mut self, max: f64) {
+        self.max_acceptable_crosstalk = max.clamp(0.0, 1.0);
+    }
+}
+
+impl Default for CrosstalkAnalyzer {
+    fn default() -> Self {
+        Self::new(0.15)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3582,5 +3679,241 @@ mod tests {
         let mut stats = CrosstalkStatistics::new();
         let dist = stats.compute_distribution(&calibration.matrix);
         assert!(dist.num_samples >= 2);
+    }
+
+    // ---------------------------------------------------------------------------
+    // CrosstalkAnalyzer tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn crosstalk_analyzer_new() {
+        let analyzer = CrosstalkAnalyzer::new(0.1);
+        assert!((analyzer.max_acceptable_crosstalk - 0.1).abs() < 0.001);
+    }
+
+    #[test]
+    fn crosstalk_analyzer_analyze_identity() {
+        let mut analyzer = CrosstalkAnalyzer::new(0.15);
+        let matrix = CrosstalkMatrix::identity(2, vec![-1, 1]);
+        let analysis = analyzer.analyze(&matrix);
+        assert!(analysis.within_limits);
+        assert!((analysis.peak_magnitude - 0.0).abs() < 0.001);
+        assert!(analysis.quality.quality_score >= 0.0);
+    }
+
+    #[test]
+    fn crosstalk_analyzer_analyze_high_crosstalk() {
+        let mut analyzer = CrosstalkAnalyzer::new(0.15);
+        let matrix = CrosstalkMatrix::new(
+            2,
+            vec![vec![0.8f64, 0.3], vec![0.2, 0.8]],
+            vec![-1, 1],
+        )
+        .unwrap();
+        let analysis = analyzer.analyze(&matrix);
+        assert!(!analysis.within_limits);
+        assert!(analysis.peak_magnitude > 0.15);
+        assert!(analysis.recommended_strategy as u32 >= 0);
+    }
+
+    #[test]
+    fn crosstalk_analyzer_recommended_strategy_low() {
+        let mut analyzer = CrosstalkAnalyzer::new(0.15);
+        let matrix = CrosstalkMatrix::identity(2, vec![-1, 1]);
+        let analysis = analyzer.analyze(&matrix);
+        assert_eq!(
+            analysis.recommended_strategy,
+            MitigationStrategy::Thresholding
+        );
+    }
+
+    #[test]
+    fn crosstalk_analyzer_recommended_strategy_medium() {
+        let mut analyzer = CrosstalkAnalyzer::new(0.15);
+        let matrix = CrosstalkMatrix::new(
+            2,
+            vec![vec![0.9f64, 0.1], vec![0.05, 0.9]],
+            vec![-1, 1],
+        )
+        .unwrap();
+        let analysis = analyzer.analyze(&matrix);
+        assert_eq!(
+            analysis.recommended_strategy,
+            MitigationStrategy::RegularizedInversion
+        );
+    }
+
+    #[test]
+    fn crosstalk_analyzer_recommended_strategy_high() {
+        let mut analyzer = CrosstalkAnalyzer::new(0.15);
+        let matrix = CrosstalkMatrix::new(
+            2,
+            vec![vec![0.7f64, 0.35], vec![0.3, 0.7]],
+            vec![-1, 1],
+        )
+        .unwrap();
+        let analysis = analyzer.analyze(&matrix);
+        assert!(matches!(
+            analysis.recommended_strategy,
+            MitigationStrategy::TruncatedSVD | MitigationStrategy::IterativeRefinement
+        ));
+    }
+
+    #[test]
+    fn crosstalk_analyzer_distribution_history() {
+        let mut analyzer = CrosstalkAnalyzer::new(0.15);
+        let m1 = CrosstalkMatrix::identity(2, vec![-1, 1]);
+        let m2 = CrosstalkMatrix::new(
+            2,
+            vec![vec![0.9f64, 0.1], vec![0.1, 0.9]],
+            vec![-1, 1],
+        )
+        .unwrap();
+        analyzer.analyze(&m1);
+        analyzer.analyze(&m2);
+        assert_eq!(analyzer.distribution_history().len(), 2);
+        assert_eq!(analyzer.quality_history().len(), 2);
+    }
+
+    #[test]
+    fn crosstalk_analyzer_reset() {
+        let mut analyzer = CrosstalkAnalyzer::new(0.15);
+        let m = CrosstalkMatrix::identity(2, vec![-1, 1]);
+        analyzer.analyze(&m);
+        assert!(!analyzer.distribution_history().is_empty());
+        analyzer.reset();
+        assert_eq!(analyzer.distribution_history().len(), 0);
+        assert_eq!(analyzer.quality_history().len(), 0);
+    }
+
+    #[test]
+    fn crosstalk_analyzer_set_max_acceptable() {
+        let mut analyzer = CrosstalkAnalyzer::new(0.15);
+        analyzer.set_max_acceptable_crosstalk(0.05);
+        assert!((analyzer.max_acceptable_crosstalk - 0.05).abs() < 0.001);
+        analyzer.set_max_acceptable_crosstalk(2.0); // Clamped to 1.0.
+        assert!((analyzer.max_acceptable_crosstalk - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn crosstalk_analysis_fields() {
+        let matrix = CrosstalkMatrix::identity(2, vec![-1, 1]);
+        let quality = CrosstalkQuality {
+            overall_level: 0.0,
+            diagonal_dominance: 1.0,
+            max_off_diagonal: 0.0,
+            pass_threshold: 0.15,
+            quality_score: 1.0,
+        };
+        let distribution = CrosstalkDistribution {
+            mean: 0.0,
+            std_dev: 0.0,
+            min: 0.0,
+            max: 0.0,
+            median: 0.0,
+            p95: 0.0,
+            num_samples: 2,
+            histogram: vec![],
+        };
+        let analysis = CrosstalkAnalysis {
+            matrix,
+            quality,
+            distribution,
+            peak_magnitude: 0.0,
+            within_limits: true,
+            recommended_strategy: MitigationStrategy::Thresholding,
+        };
+        assert!(analysis.within_limits);
+        assert!((analysis.peak_magnitude - 0.0).abs() < 0.001);
+        assert_eq!(analysis.distribution.num_samples, 2);
+    }
+
+    #[test]
+    fn crosstalk_analyzer_single_channel() {
+        let mut analyzer = CrosstalkAnalyzer::new(0.15);
+        let matrix = CrosstalkMatrix::identity(1, vec![0]);
+        let analysis = analyzer.analyze(&matrix);
+        assert!(analysis.within_limits);
+        assert!((analysis.peak_magnitude - 0.0).abs() < 0.001);
+    }
+
+    // ---------------------------------------------------------------------------
+    // End-to-end full crosstalk pipeline with temporal window + frequency response
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn crosstalk_full_pipeline_temporal_and_frequency() {
+        // Build temporal window with evolving crosstalk.
+        let mut window_mgr = CrosstalkTemporalWindowManager::new(2, 8);
+        for t in 0..8u64 {
+            let val = 0.05 + 0.02 * (t as f64);
+            window_mgr.record(t, 0, 1, val).unwrap();
+            window_mgr.record(t, 1, 0, val * 0.5).unwrap();
+        }
+
+        let trend = window_mgr.crosstalk_trend();
+        assert!(trend > 0.0); // Increasing crosstalk.
+
+        let avg_matrix = window_mgr.average_matrix().unwrap();
+        assert_eq!(avg_matrix.num_channels, 2);
+
+        let current = window_mgr.current_matrix().unwrap();
+        assert_eq!(current.num_channels, 2);
+
+        // Compute frequency response for channel pair (0,1).
+        let mut freq_computer = CrosstalkFrequencyResponseComputer::new(8);
+        let window = &window_mgr.window;
+        let response = freq_computer
+            .compute_response(window, 0, 1)
+            .unwrap();
+        assert_eq!(response.source, 0);
+        assert_eq!(response.destination, 1);
+        assert_eq!(response.frequencies.len(), 8);
+        assert_eq!(response.magnitudes.len(), 8);
+        assert_eq!(response.phases.len(), 8);
+
+        let peak_freq = freq_computer.peak_frequency(&response);
+        assert!(peak_freq >= 0.0);
+        assert!(peak_freq <= 1.0);
+
+        // Run full crosstalk analysis.
+        let mut analyzer = CrosstalkAnalyzer::new(0.2);
+        let analysis = analyzer.analyze(&avg_matrix);
+        assert!(analysis.within_limits);
+    }
+
+    #[test]
+    fn crosstalk_temporal_window_error_on_bad_channel() {
+        let mut window_mgr = CrosstalkTemporalWindowManager::new(2, 4);
+        let result = window_mgr.record(0, 5, 1, 0.5);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn crosstalk_freq_response_error_on_bad_channel() {
+        let mut computer = CrosstalkFrequencyResponseComputer::new(4);
+        let window = CrosstalkTemporalWindow {
+            window_size: 4,
+            window: vec![vec![vec![0.0f64; 2]; 2]; 4],
+            timestamps: vec![0; 4],
+            write_pos: 0,
+            is_full: false,
+        };
+        let result = computer.compute_response(&window, 5, 1);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn crosstalk_freq_response_empty_window() {
+        let mut computer = CrosstalkFrequencyResponseComputer::new(4);
+        let window = CrosstalkTemporalWindow {
+            window_size: 4,
+            window: vec![vec![vec![0.0f64; 2]; 2]; 4],
+            timestamps: vec![0; 4],
+            write_pos: 0,
+            is_full: false,
+        };
+        let result = computer.compute_response(&window, 0, 1);
+        assert!(result.is_err());
     }
 }
