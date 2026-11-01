@@ -1595,4 +1595,674 @@ mod tests {
         let config = MaskingConfig::default();
         let _mask = IntensityMask::with_config(config);
     }
+
+    // ---------------------------------------------------------------------------
+    // MultiScaleThreshold tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn multi_scale_threshold_default_config() {
+        let config = MultiScaleThreshold::default();
+        assert_eq!(config.tile_size, 64);
+        assert_eq!(config.overlap, 16);
+        assert_eq!(config.local_fraction, 0.2);
+        assert_eq!(config.blend_weight, 0.5);
+    }
+
+    #[test]
+    fn multi_scale_threshold_empty_input() {
+        let config = MultiScaleThreshold::default();
+        let result = config.compute_threshold_map(&[]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn multi_scale_threshold_single_pixel() {
+        let config = MultiScaleThreshold::default();
+        let intensities = vec![vec![5.0f64]];
+        let result = config.compute_threshold_map(&intensities);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].len(), 1);
+        assert!(result[0][0] > 0.0);
+    }
+
+    #[test]
+    fn multi_scale_threshold_uniform_field() {
+        let config = MultiScaleThreshold {
+            local_fraction: 0.5,
+            ..Default::default()
+        };
+        let intensities = vec![vec![1.0f64; 64]; 64];
+        let result = config.compute_threshold_map(&intensities);
+        // All thresholds should be approximately equal (uniform field)
+        for row in &result {
+            for &val in row {
+                assert!((val - 0.5).abs() < 0.1);
+            }
+        }
+    }
+
+    #[test]
+    fn multi_scale_threshold_apply_mask() {
+        let config = MultiScaleThreshold::default();
+        let intensities = vec![
+            vec![0.1f64, 10.0, 0.1],
+            vec![10.0, 0.1, 10.0],
+            vec![0.1, 10.0, 0.1],
+        ];
+        let mask = config.apply_mask(&intensities);
+        assert_eq!(mask.len(), 3);
+        assert_eq!(mask[0].len(), 3);
+        // Center and edges with high intensity should be valid
+        assert!(mask[1][1]);
+    }
+
+    #[test]
+    fn multi_scale_threshold_tile_size_affects_result() {
+        let small_tile = MultiScaleThreshold {
+            tile_size: 8,
+            ..Default::default()
+        };
+        let large_tile = MultiScaleThreshold {
+            tile_size: 256,
+            ..Default::default()
+        };
+        let intensities: Vec<Vec<f64>> = (0..64)
+            .map(|y| (0..64).map(|x| (x + y) as f64 / 128.0).collect())
+            .collect();
+        let result_small = small_tile.compute_threshold_map(&intensities);
+        let result_large = large_tile.compute_threshold_map(&intensities);
+        assert_eq!(result_small.len(), 64);
+        assert_eq!(result_large.len(), 64);
+        // Results should differ due to different tile sizes
+        let mut diff_count = 0;
+        for y in 0..64 {
+            for x in 0..64 {
+                if (result_small[y][x] - result_large[y][x]).abs() > 0.01 {
+                    diff_count += 1;
+                }
+            }
+        }
+        assert!(diff_count > 0);
+    }
+
+    // ---------------------------------------------------------------------------
+    // LabeledComponent tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn labeled_component_default_fields() {
+        let comp = LabeledComponent {
+            label: 1,
+            pixels: vec![(10, 20), (11, 20)],
+            bounding_box: ((10, 20), (12, 21)),
+            area: 2,
+            mean_intensity: 0.5,
+            centroid: (10.5, 20.0),
+        };
+        assert_eq!(comp.label, 1);
+        assert_eq!(comp.area, 2);
+        assert_eq!(comp.width(), 2);
+        assert_eq!(comp.height(), 1);
+        assert!((comp.aspect_ratio() - 2.0).abs() < 0.001);
+        assert!((comp.solidity() - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn labeled_component_zero_height_aspect_ratio() {
+        let comp = LabeledComponent {
+            label: 0,
+            pixels: Vec::new(),
+            bounding_box: ((0, 0), (5, 0)),
+            area: 0,
+            mean_intensity: 0.0,
+            centroid: (0.0, 0.0),
+        };
+        assert_eq!(comp.aspect_ratio(), 0.0);
+    }
+
+    #[test]
+    fn labeled_component_zero_width_solidity() {
+        let comp = LabeledComponent {
+            label: 0,
+            pixels: Vec::new(),
+            bounding_box: ((0, 0), (0, 5)),
+            area: 0,
+            mean_intensity: 0.0,
+            centroid: (0.0, 0.0),
+        };
+        assert_eq!(comp.solidity(), 0.0);
+    }
+
+    #[test]
+    fn labeled_component_partial_solidity() {
+        let comp = LabeledComponent {
+            label: 0,
+            pixels: vec![(0, 0), (1, 0), (0, 1)],
+            bounding_box: ((0, 0), (2, 2)),
+            area: 3,
+            mean_intensity: 0.0,
+            centroid: (0.33, 0.33),
+        };
+        // bounding box area = 2*2 = 4, component area = 3, solidity = 0.75
+        assert!((comp.solidity() - 0.75).abs() < 0.001);
+    }
+
+    // ---------------------------------------------------------------------------
+    // ConnectedComponentLabeler tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn connected_component_labeler_default_config() {
+        let labeler = ConnectedComponentLabeler::default();
+        assert_eq!(labeler.min_size, 4);
+        assert!(labeler.max_components.is_none());
+    }
+
+    #[test]
+    fn connected_component_labeler_empty_mask() {
+        let labeler = ConnectedComponentLabeler::default();
+        let mask: Vec<Vec<bool>> = vec![];
+        let components = labeler.label(&mask);
+        assert!(components.is_empty());
+    }
+
+    #[test]
+    fn connected_component_labeler_all_false() {
+        let labeler = ConnectedComponentLabeler::default();
+        let mask = vec![vec![false; 10]; 10];
+        let components = labeler.label(&mask);
+        assert!(components.is_empty());
+    }
+
+    #[test]
+    fn connected_component_labeler_single_component() {
+        let labeler = ConnectedComponentLabeler {
+            min_size: 1,
+            ..Default::default()
+        };
+        let mut mask = vec![vec![false; 10]; 10];
+        for y in 3..7 {
+            for x in 3..7 {
+                mask[y][x] = true;
+            }
+        }
+        let components = labeler.label(&mask);
+        assert_eq!(components.len(), 1);
+        assert_eq!(components[0].area, 16);
+    }
+
+    #[test]
+    fn connected_component_labeler_two_components() {
+        let labeler = ConnectedComponentLabeler {
+            min_size: 1,
+            ..Default::default()
+        };
+        let mut mask = vec![vec![false; 20]; 20];
+        // Component 1 at top-left
+        for y in 2..5 {
+            for x in 2..5 {
+                mask[y][x] = true;
+            }
+        }
+        // Component 2 at bottom-right
+        for y in 14..17 {
+            for x in 14..17 {
+                mask[y][x] = true;
+            }
+        }
+        let components = labeler.label(&mask);
+        assert_eq!(components.len(), 2);
+        assert_eq!(components[0].area, 9);
+        assert_eq!(components[1].area, 9);
+    }
+
+    #[test]
+    fn connected_component_labeler_min_size_filter() {
+        let labeler = ConnectedComponentLabeler {
+            min_size: 10,
+            ..Default::default()
+        };
+        let mut mask = vec![vec![false; 20]; 20];
+        // Small component (3x3 = 9 pixels, below min_size)
+        for y in 2..5 {
+            for x in 2..5 {
+                mask[y][x] = true;
+            }
+        }
+        // Large component (5x5 = 25 pixels, above min_size)
+        for y in 10..15 {
+            for x in 10..15 {
+                mask[y][x] = true;
+            }
+        }
+        let components = labeler.label(&mask);
+        assert_eq!(components.len(), 1);
+        assert_eq!(components[0].area, 25);
+    }
+
+    #[test]
+    fn connected_component_labeler_max_components_limit() {
+        let labeler = ConnectedComponentLabeler {
+            min_size: 1,
+            max_components: Some(2),
+            ..Default::default()
+        };
+        let mut mask = vec![vec![false; 30]; 30];
+        // Three separate components
+        for y in 2..4 {
+            for x in 2..4 {
+                mask[y][x] = true;
+            }
+        }
+        for y in 10..12 {
+            for x in 10..12 {
+                mask[y][x] = true;
+            }
+        }
+        for y in 20..22 {
+            for x in 20..22 {
+                mask[y][x] = true;
+            }
+        }
+        let components = labeler.label(&mask);
+        assert_eq!(components.len(), 2);
+    }
+
+    #[test]
+    fn connected_component_labeler_8_connectivity() {
+        let labeler = ConnectedComponentLabeler {
+            min_size: 1,
+            ..Default::default()
+        };
+        // Diagonal connection: pixels at (0,0) and (1,1) should be connected via 8-connectivity
+        let mut mask = vec![vec![false; 5]; 5];
+        mask[0][0] = true;
+        mask[1][1] = true;
+        let components = labeler.label(&mask);
+        assert_eq!(components.len(), 1); // Connected diagonally
+        assert_eq!(components[0].area, 2);
+    }
+
+    #[test]
+    fn connected_component_labeler_sort_by_area() {
+        let labeler = ConnectedComponentLabeler {
+            min_size: 1,
+            ..Default::default()
+        };
+        let mut mask = vec![vec![false; 20]; 20];
+        // Small component
+        for y in 2..4 {
+            for x in 2..4 {
+                mask[y][x] = true;
+            }
+        }
+        // Large component
+        for y in 10..15 {
+            for x in 10..15 {
+                mask[y][x] = true;
+            }
+        }
+        let components = labeler.label(&mask);
+        assert_eq!(components.len(), 2);
+        assert!(components[0].area >= components[1].area);
+    }
+
+    #[test]
+    fn connected_component_labeler_label_with_intensity() {
+        let labeler = ConnectedComponentLabeler {
+            min_size: 1,
+            ..Default::default()
+        };
+        let mut mask = vec![vec![false; 5]; 5];
+        let mut intensities = vec![vec![0.0f64; 5]; 5];
+        for y in 1..4 {
+            for x in 1..4 {
+                mask[y][x] = true;
+                intensities[y][x] = 2.0;
+            }
+        }
+        let components = labeler.label_with_intensity(&mask, &intensities);
+        assert_eq!(components.len(), 1);
+        assert!((components[0].mean_intensity - 2.0).abs() < 0.001);
+    }
+
+    // ---------------------------------------------------------------------------
+    // MorphologicalOps tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn morphological_ops_dilate_expands_region() {
+        let mut mask = vec![vec![false; 5]; 5];
+        mask[2][2] = true;
+        let result = MorphologicalOps::dilate(&mask, 1);
+        // After dilation with radius 1, the 3x3 neighborhood should be true
+        assert!(result[1][1]);
+        assert!(result[1][2]);
+        assert!(result[1][3]);
+        assert!(result[2][1]);
+        assert!(result[2][2]);
+        assert!(result[2][3]);
+        assert!(result[3][1]);
+        assert!(result[3][2]);
+        assert!(result[3][3]);
+    }
+
+    #[test]
+    fn morphological_ops_dilate_empty_mask() {
+        let mask: Vec<Vec<bool>> = vec![vec![false; 5]; 5];
+        let result = MorphologicalOps::dilate(&mask, 2);
+        assert_eq!(result.len(), 5);
+        assert!(result.iter().all(|row| row.iter().all(|&v| !v)));
+    }
+
+    #[test]
+    fn morphological_ops_erode_shrinks_region() {
+        let mut mask = vec![vec![true; 5]; 5];
+        let result = MorphologicalOps::erode(&mask, 1);
+        // After erosion with radius 1, only the center 3x3 should remain true
+        // (pixels on the edge don't have all neighbors true)
+        assert!(result[2][2]);
+        assert!(!result[0][0]); // Edge pixel eroded
+        assert!(!result[0][2]); // Edge pixel eroded
+    }
+
+    #[test]
+    fn morphological_ops_erode_single_pixel() {
+        let mut mask = vec![vec![false; 5]; 5];
+        mask[2][2] = true;
+        let result = MorphologicalOps::erode(&mask, 1);
+        // Single pixel eroded with radius 1 -> all false (no 3x3 neighborhood)
+        assert!(!result[2][2]);
+    }
+
+    #[test]
+    fn morphological_ops_open_removes_noise() {
+        let mut mask = vec![vec![false; 10]; 10];
+        // Small 2x2 noise cluster
+        mask[5][5] = true;
+        mask[5][6] = true;
+        mask[6][5] = true;
+        mask[6][6] = true;
+        // Large region
+        for y in 2..8 {
+            for x in 2..8 {
+                mask[y][x] = true;
+            }
+        }
+        let opened = MorphologicalOps::open(&mask, 1);
+        // Opening should remove or shrink small noise but preserve large region
+        assert!(opened[5][5]); // Large region preserved
+    }
+
+    #[test]
+    fn morphological_ops_close_fills_holes() {
+        let mut mask = vec![vec![true; 10]; 10];
+        // Create a hole in the middle
+        for y in 4..7 {
+            for x in 4..7 {
+                mask[y][x] = false;
+            }
+        }
+        let closed = MorphologicalOps::close(&mask, 2);
+        // Closing with radius 2 should fill the 3x3 hole
+        assert!(closed[5][5]);
+    }
+
+    #[test]
+    fn morphological_ops_empty_mask_operations() {
+        let mask: Vec<Vec<bool>> = vec![];
+        assert!(MorphologicalOps::dilate(&mask, 1).is_empty());
+        assert!(MorphologicalOps::erode(&mask, 1).is_empty());
+        assert!(MorphologicalOps::open(&mask, 1).is_empty());
+        assert!(MorphologicalOps::close(&mask, 1).is_empty());
+    }
+
+    // ---------------------------------------------------------------------------
+    // MaskQualityMetrics tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn mask_quality_metrics_empty_mask() {
+        let metrics = compute_mask_quality(&[], None);
+        assert_eq!(metrics.foreground_fraction, 0.0);
+        assert_eq!(metrics.component_count, 0);
+        assert_eq!(metrics.quality_score(), 0.0);
+    }
+
+    #[test]
+    fn mask_quality_metrics_all_true() {
+        let mask = vec![vec![true; 10]; 10];
+        let metrics = compute_mask_quality(&mask, None);
+        assert!((metrics.foreground_fraction - 1.0).abs() < 0.001);
+        assert_eq!(metrics.component_count, 1);
+        assert_eq!(metrics.largest_component_area, 100);
+        assert_eq!(metrics.entropy, 0.0);
+    }
+
+    #[test]
+    fn mask_quality_metrics_all_false() {
+        let mask = vec![vec![false; 10]; 10];
+        let metrics = compute_mask_quality(&mask, None);
+        assert_eq!(metrics.foreground_fraction, 0.0);
+        assert_eq!(metrics.component_count, 0);
+        assert_eq!(metrics.entropy, 0.0);
+    }
+
+    #[test]
+    fn mask_quality_metrics_half_half() {
+        let mut mask = vec![vec![false; 10]; 10];
+        for y in 0..10 {
+            for x in 0..5 {
+                mask[y][x] = true;
+            }
+        }
+        let metrics = compute_mask_quality(&mask, None);
+        assert!((metrics.foreground_fraction - 0.5).abs() < 0.001);
+        assert_eq!(metrics.component_count, 1);
+        assert!(metrics.entropy > 0.0);
+    }
+
+    #[test]
+    fn mask_quality_metrics_quality_score_range() {
+        let mask = vec![vec![true; 10]; 10];
+        let metrics = compute_mask_quality(&mask, None);
+        let score = metrics.quality_score();
+        assert!(score >= 0.0);
+        assert!(score <= 1.0);
+    }
+
+    #[test]
+    fn mask_quality_metrics_boundary_complexity() {
+        let mask = vec![vec![true; 10]; 10];
+        let metrics = compute_mask_quality(&mask, None);
+        // Full field: perimeter = 40, area = 100, complexity = 0.4
+        assert!((metrics.boundary_complexity - 0.4).abs() < 0.001);
+    }
+
+    #[test]
+    fn mask_quality_metrics_single_pixel() {
+        let mut mask = vec![vec![false; 5]; 5];
+        mask[2][2] = true;
+        let metrics = compute_mask_quality(&mask, None);
+        assert_eq!(metrics.component_count, 1);
+        assert_eq!(metrics.largest_component_area, 1);
+        assert_eq!(metrics.mean_component_area, 1.0);
+    }
+
+    // ---------------------------------------------------------------------------
+    // MaskOp and combine_masks tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn combine_masks_and_operation() {
+        let a = vec![vec![true, false], vec![true, false]];
+        let b = vec![vec![true, true], vec![false, false]];
+        let result = combine_masks(&a, &b, MaskOp::And);
+        assert!(result[0][0]); // true AND true = true
+        assert!(!result[0][1]); // false AND true = false
+        assert!(!result[1][0]); // true AND false = false
+        assert!(!result[1][1]); // false AND false = false
+    }
+
+    #[test]
+    fn combine_masks_or_operation() {
+        let a = vec![vec![true, false], vec![false, false]];
+        let b = vec![vec![false, true], vec![false, false]];
+        let result = combine_masks(&a, &b, MaskOp::Or);
+        assert!(result[0][0]); // true OR false = true
+        assert!(result[0][1]); // false OR true = true
+        assert!(!result[1][0]); // false OR false = false
+        assert!(!result[1][1]); // false OR false = false
+    }
+
+    #[test]
+    fn combine_masks_xor_operation() {
+        let a = vec![vec![true, true], vec![false, false]];
+        let b = vec![vec![true, false], vec![false, false]];
+        let result = combine_masks(&a, &b, MaskOp::Xor);
+        assert!(!result[0][0]); // true XOR true = false
+        assert!(result[0][1]); // true XOR false = true
+        assert!(!result[1][0]); // false XOR false = false
+        assert!(!result[1][1]); // false XOR false = false
+    }
+
+    #[test]
+    fn combine_masks_not_operation() {
+        let a = vec![vec![true, false], vec![false, true]];
+        let b = vec![vec![false, false], vec![false, false]]; // ignored
+        let result = combine_masks(&a, &b, MaskOp::Not);
+        assert!(!result[0][0]); // NOT true = false
+        assert!(result[0][1]); // NOT false = true
+        assert!(result[1][0]); // NOT false = true
+        assert!(!result[1][1]); // NOT true = false
+    }
+
+    #[test]
+    fn combine_masks_empty_input() {
+        let a: Vec<Vec<bool>> = vec![];
+        let b: Vec<Vec<bool>> = vec![];
+        let result = combine_masks(&a, &b, MaskOp::And);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn combine_masks_mismatched_dimensions() {
+        let a = vec![vec![true; 5]; 5];
+        let b = vec![vec![true; 3]; 3];
+        let result = combine_masks(&a, &b, MaskOp::And);
+        // Should use a's dimensions, treat out-of-bounds b as false
+        assert_eq!(result.len(), 5);
+        assert_eq!(result[0].len(), 5);
+        // Only positions where b has valid true values should be true
+        assert!(result[0][0]);
+        assert!(!result[3][3]); // b[3][3] out of bounds -> false
+    }
+
+    #[test]
+    fn mask_op_debug_and_clone() {
+        let op = MaskOp::And;
+        let _debug = format!("{:?}", op);
+        let cloned = op.clone();
+        assert_eq!(cloned, MaskOp::And);
+        assert_ne!(cloned, MaskOp::Or);
+    }
+
+    // ---------------------------------------------------------------------------
+    // RegionalStatistics tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn regional_statistics_cv_zero_mean() {
+        let stats = RegionalStatistics {
+            label: 1,
+            count: 10,
+            mean: 0.0,
+            variance: 1.0,
+            std_dev: 1.0,
+            min: 0.0,
+            max: 2.0,
+            median: 1.0,
+        };
+        assert_eq!(stats.cv(), 0.0);
+    }
+
+    #[test]
+    fn regional_statistics_cv_normal() {
+        let stats = RegionalStatistics {
+            label: 1,
+            count: 10,
+            mean: 10.0,
+            variance: 4.0,
+            std_dev: 2.0,
+            min: 5.0,
+            max: 15.0,
+            median: 10.0,
+        };
+        assert!((stats.cv() - 0.2).abs() < 0.001);
+    }
+
+    #[test]
+    fn compute_regional_statistics_empty_components() {
+        let intensities = vec![vec![1.0f64; 10]; 10];
+        let stats = compute_regional_statistics(&[], &intensities);
+        assert!(stats.is_empty());
+    }
+
+    #[test]
+    fn compute_regional_statistics_single_component() {
+        let intensities = vec![vec![2.0f64; 4]; 4];
+        let comp = LabeledComponent {
+            label: 1,
+            pixels: vec![(0, 0), (0, 1), (1, 0), (1, 1)],
+            bounding_box: ((0, 0), (2, 2)),
+            area: 4,
+            mean_intensity: 2.0,
+            centroid: (0.5, 0.5),
+        };
+        let stats = compute_regional_statistics(&[comp], &intensities);
+        assert_eq!(stats.len(), 1);
+        assert_eq!(stats[0].count, 4);
+        assert!((stats[0].mean - 2.0).abs() < 0.001);
+        assert!((stats[0].min - 2.0).abs() < 0.001);
+        assert!((stats[0].max - 2.0).abs() < 0.001);
+        assert!((stats[0].median - 2.0).abs() < 0.001);
+        assert_eq!(stats[0].variance, 0.0);
+        assert_eq!(stats[0].std_dev, 0.0);
+    }
+
+    #[test]
+    fn compute_regional_statistics_variance() {
+        let intensities = vec![vec![1.0f64, 2.0, 3.0]; 1];
+        let comp = LabeledComponent {
+            label: 1,
+            pixels: vec![(0, 0), (1, 0), (2, 0)],
+            bounding_box: ((0, 0), (3, 1)),
+            area: 3,
+            mean_intensity: 2.0,
+            centroid: (1.0, 0.0),
+        };
+        let stats = compute_regional_statistics(&[comp], &intensities);
+        assert_eq!(stats[0].count, 3);
+        assert!((stats[0].mean - 2.0).abs() < 0.001);
+        // variance of [1, 2, 3] = ((1-2)^2 + (2-2)^2 + (3-2)^2) / 3 = 2/3
+        assert!((stats[0].variance - 0.666667).abs() < 0.01);
+        assert!((stats[0].median - 2.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn compute_regional_statistics_out_of_bounds_pixels_skipped() {
+        let intensities = vec![vec![1.0f64; 2]; 2];
+        let comp = LabeledComponent {
+            label: 1,
+            pixels: vec![(0, 0), (5, 5), (10, 10)], // only (0,0) is valid
+            bounding_box: ((0, 0), (11, 11)),
+            area: 3,
+            mean_intensity: 0.0,
+            centroid: (5.0, 5.0),
+        };
+        let stats = compute_regional_statistics(&[comp], &intensities);
+        assert_eq!(stats[0].count, 1);
+        assert!((stats[0].mean - 1.0).abs() < 0.001);
+    }
 }
