@@ -601,6 +601,810 @@ impl IntensityMask {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Multi-scale thresholding
+// ---------------------------------------------------------------------------
+
+/// Multi-scale adaptive thresholding for non-uniform illumination fields.
+///
+/// Divides the field into overlapping tiles, computes a local threshold for
+/// each tile based on its intensity distribution, and blends thresholds
+/// across tile boundaries to avoid blocking artifacts.
+pub struct MultiScaleThreshold {
+    /// Tile size in pixels (square tiles).
+    pub tile_size: usize,
+    /// Overlap between adjacent tiles in pixels.
+    pub overlap: usize,
+    /// Threshold fraction applied to each tile's local maximum.
+    pub local_fraction: f64,
+    /// Blend weight for boundary smoothing (0.0 = no blending, 1.0 = full).
+    pub blend_weight: f64,
+}
+
+impl Default for MultiScaleThreshold {
+    fn default() -> Self {
+        Self {
+            tile_size: 64,
+            overlap: 16,
+            local_fraction: 0.2,
+            blend_weight: 0.5,
+        }
+    }
+}
+
+impl MultiScaleThreshold {
+    /// Compute a per-pixel threshold map using multi-scale local thresholding.
+    ///
+    /// Returns a grid of threshold values matching the input intensity dimensions.
+    pub fn compute_threshold_map(&self, intensities: &[Vec<f64>]) -> Vec<Vec<f64>> {
+        let height = intensities.len();
+        if height == 0 {
+            return Vec::new();
+        }
+        let width = intensities[0].len();
+        let mut threshold_map = vec![vec![0.0f64; width]; height];
+        let mut weight_map = vec![vec![0.0f64; width]; height];
+
+        let tile = self.tile_size;
+        let overlap = self.overlap;
+        let fraction = self.local_fraction;
+
+        let mut ty = 0usize;
+        while ty < height {
+            let mut tx = 0usize;
+            while tx < width {
+                let ty_end = (ty + tile).min(height);
+                let tx_end = (tx + tile).min(width);
+
+                // Compute local max and mean within this tile.
+                let mut local_max = 0.0f64;
+                let mut local_sum = 0.0f64;
+                let mut count = 0usize;
+                for y in ty..ty_end {
+                    for x in tx..tx_end {
+                        let v = intensities[y][x];
+                        if v > local_max {
+                            local_max = v;
+                        }
+                        local_sum += v;
+                        count += 1;
+                    }
+                }
+                let local_mean = if count > 0 {
+                    local_sum / count as f64
+                } else {
+                    0.0
+                };
+                let local_threshold = (local_max * fraction).max(local_mean * 0.5);
+
+                // Apply this threshold to the tile region with blending.
+                let blend = self.blend_weight;
+                for y in ty..ty_end {
+                    for x in tx..tx_end {
+                        let dx =
+                            (x as i64 - tx as i64).abs().min((tx_end as i64 - x as i64 - 1).abs())
+                                as f64;
+                        let dy =
+                            (y as i64 - ty as i64).abs().min((ty_end as i64 - y as i64 - 1).abs())
+                                as f64;
+                        let edge_dist = dx.min(dy);
+                        let w = (edge_dist / overlap as f64).clamp(0.0, 1.0);
+
+                        let existing = threshold_map[y][x];
+                        let existing_w = weight_map[y][x];
+                        if existing_w == 0.0 {
+                            threshold_map[y][x] = local_threshold;
+                            weight_map[y][x] = 1.0;
+                        } else {
+                            let total_w = existing_w + w;
+                            threshold_map[y][x] =
+                                (existing * existing_w + local_threshold * w) / total_w;
+                            weight_map[y][x] = total_w;
+                        }
+                    }
+                }
+
+                tx = tx_end.saturating_sub(overlap);
+                if tx_end >= width {
+                    break;
+                }
+            }
+            ty = ty_end.saturating_sub(overlap);
+            if ty_end >= height {
+                break;
+            }
+        }
+
+        // Fill any uncovered pixels with global median threshold.
+        let global = Self::global_threshold(intensities);
+        for y in 0..height {
+            for x in 0..width {
+                if weight_map[y][x] == 0.0 {
+                    threshold_map[y][x] = global;
+                }
+            }
+        }
+
+        threshold_map
+    }
+
+    /// Global fallback threshold — median of all intensities.
+    fn global_threshold(intensities: &[Vec<f64>]) -> f64 {
+        let mut values: Vec<f64> = intensities
+            .iter()
+            .flat_map(|row| row.iter().copied())
+            .collect();
+        values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mid = values.len() / 2;
+        if values.len() % 2 == 0 {
+            (values[mid - 1] + values[mid]) / 2.0
+        } else {
+            values[mid]
+        }
+    }
+
+    /// Apply multi-scale thresholding to produce a binary mask.
+    pub fn apply_mask(&self, intensities: &[Vec<f64>]) -> Vec<Vec<bool>> {
+        let threshold_map = self.compute_threshold_map(intensities);
+        let height = intensities.len();
+        if height == 0 {
+            return Vec::new();
+        }
+        let width = intensities[0].len();
+        let mut mask = vec![vec![false; width]; height];
+        for y in 0..height {
+            for x in 0..width {
+                mask[y][x] = intensities[y][x] >= threshold_map[y][x];
+            }
+        }
+        mask
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Connected component labeling (8-connectivity, union-find)
+// ---------------------------------------------------------------------------
+
+/// A labeled connected component in a binary mask.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LabeledComponent {
+    /// Component label (unique ID).
+    pub label: u32,
+    /// Pixels belonging to this component.
+    pub pixels: Vec<(usize, usize)>,
+    /// Bounding box ((x_min, y_min), (x_max, y_max)).
+    pub bounding_box: ((usize, usize), (usize, usize)),
+    /// Component area (pixel count).
+    pub area: usize,
+    /// Average intensity within the component.
+    pub mean_intensity: f64,
+    /// Centroid (x, y) in pixel coordinates.
+    pub centroid: (f64, f64),
+}
+
+impl LabeledComponent {
+    /// Returns the component's width.
+    pub fn width(&self) -> usize {
+        self.bounding_box.1 .0 - self.bounding_box.0 .0
+    }
+
+    /// Returns the component's height.
+    pub fn height(&self) -> usize {
+        self.bounding_box.1 .1 - self.bounding_box.0 .1
+    }
+
+    /// Returns the component's aspect ratio (width / height).
+    pub fn aspect_ratio(&self) -> f64 {
+        let h = self.height();
+        if h == 0 {
+            return 0.0;
+        }
+        self.width() as f64 / h as f64
+    }
+
+    /// Returns the component's solidity (area / bounding box area).
+    pub fn solidity(&self) -> f64 {
+        let w = self.width();
+        let h = self.height();
+        if w == 0 || h == 0 {
+            return 0.0;
+        }
+        self.area as f64 / (w * h) as f64
+    }
+}
+
+/// Union-find data structure for connected component labeling.
+struct UnionFind {
+    parent: Vec<usize>,
+    rank: Vec<usize>,
+}
+
+impl UnionFind {
+    fn new(n: usize) -> Self {
+        Self {
+            parent: (0..n).collect(),
+            rank: vec![0; n],
+        }
+    }
+
+    fn find(&mut self, x: usize) -> usize {
+        if self.parent[x] != x {
+            self.parent[x] = self.find(self.parent[x]);
+        }
+        self.parent[x]
+    }
+
+    fn union(&mut self, x: usize, y: usize) {
+        let rx = self.find(x);
+        let ry = self.find(y);
+        if rx == ry {
+            return;
+        }
+        if self.rank[rx] < self.rank[ry] {
+            self.parent[rx] = ry;
+        } else if self.rank[rx] > self.rank[ry] {
+            self.parent[ry] = rx;
+        } else {
+            self.parent[ry] = rx;
+            self.rank[rx] += 1;
+        }
+    }
+}
+
+/// Connected component labeling with 8-connectivity.
+pub struct ConnectedComponentLabeler {
+    /// Minimum component size in pixels (smaller components are filtered).
+    pub min_size: usize,
+    /// Maximum number of components to return (sorted by area descending).
+    pub max_components: Option<usize>,
+}
+
+impl Default for ConnectedComponentLabeler {
+    fn default() -> Self {
+        Self {
+            min_size: 4,
+            max_components: None,
+        }
+    }
+}
+
+impl ConnectedComponentLabeler {
+    /// Label all connected components in a binary mask.
+    ///
+    /// Uses 8-connectivity (diagonal neighbors are connected).
+    /// Returns components sorted by area descending.
+    pub fn label(&self, mask: &[Vec<bool>]) -> Vec<LabeledComponent> {
+        let height = mask.len();
+        if height == 0 {
+            return Vec::new();
+        }
+        let width = mask[0].len();
+
+        // Assign a unique index to each foreground pixel.
+        let mut pixel_index = vec![vec![None; width]; height];
+        let mut foreground_pixels = Vec::new();
+        for y in 0..height {
+            for x in 0..width {
+                if mask[y][x] {
+                    pixel_index[y][x] = Some(foreground_pixels.len());
+                    foreground_pixels.push((x, y));
+                }
+            }
+        }
+
+        let n = foreground_pixels.len();
+        if n == 0 {
+            return Vec::new();
+        }
+
+        let mut uf = UnionFind::new(n);
+
+        // Union 8-connected neighbors.
+        for (idx, &(x, y)) in foreground_pixels.iter().enumerate() {
+            for dy in 0..=1i64 {
+                for dx in 0..=1i64 {
+                    if dx == 0 && dy == 0 {
+                        continue;
+                    }
+                    let nx = x as i64 + dx;
+                    let ny = y as i64 + dy;
+                    if nx < 0 || nx >= width as i64 || ny < 0 || ny >= height as i64 {
+                        continue;
+                    }
+                    let nx = nx as usize;
+                    let ny = ny as usize;
+                    if mask[ny][nx] {
+                        let neighbor_idx = pixel_index[ny][nx].unwrap();
+                        uf.union(idx, neighbor_idx);
+                    }
+                }
+            }
+        }
+
+        // Group pixels by root.
+        let mut groups: HashMap<usize, Vec<usize>> = HashMap::new();
+        for i in 0..n {
+            let root = uf.find(i);
+            groups.entry(root).or_default().push(i);
+        }
+
+        // Build components.
+        let mut components: Vec<LabeledComponent> = groups
+            .into_iter()
+            .enumerate()
+            .filter_map(|(label, member_indices)| {
+                if member_indices.len() < self.min_size {
+                    return None;
+                }
+                let mut pixels: Vec<(usize, usize)> =
+                    member_indices.iter().map(|&i| foreground_pixels[i]).collect();
+                pixels.sort();
+
+                let x_min = pixels.iter().map(|p| p.0).min().unwrap_or(0);
+                let x_max = pixels.iter().map(|p| p.0).max().unwrap_or(0);
+                let y_min = pixels.iter().map(|p| p.1).min().unwrap_or(0);
+                let y_max = pixels.iter().map(|p| p.1).max().unwrap_or(0);
+
+                let area = pixels.len();
+                let centroid_x =
+                    pixels.iter().map(|p| p.0 as f64).sum::<f64>() / area as f64;
+                let centroid_y =
+                    pixels.iter().map(|p| p.1 as f64).sum::<f64>() / area as f64;
+
+                Some(LabeledComponent {
+                    label: label as u32,
+                    pixels,
+                    bounding_box: ((x_min, y_min), (x_max + 1, y_max + 1)),
+                    area,
+                    mean_intensity: 0.0, // filled below if intensities available
+                    centroid: (centroid_x, centroid_y),
+                })
+            })
+            .collect();
+
+        // Sort by area descending.
+        components.sort_by(|a, b| b.area.cmp(&a.area));
+
+        // Apply max_components limit.
+        if let Some(max) = self.max_components {
+            components.truncate(max);
+        }
+
+        components
+    }
+
+    /// Label components and compute mean intensity for each using an intensity field.
+    pub fn label_with_intensity(
+        &self,
+        mask: &[Vec<bool>],
+        intensities: &[Vec<f64>],
+    ) -> Vec<LabeledComponent> {
+        let mut components = self.label(mask);
+        for comp in components.iter_mut() {
+            let mut sum = 0.0f64;
+            let mut count = 0usize;
+            for &(x, y) in comp.pixels.iter() {
+                if y < intensities.len() && x < intensities[y].len() {
+                    sum += intensities[y][x];
+                    count += 1;
+                }
+            }
+            comp.mean_intensity = if count > 0 {
+                sum / count as f64
+            } else {
+                0.0
+            };
+        }
+        components
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Morphological operations on binary masks
+// ---------------------------------------------------------------------------
+
+/// Morphological operations for binary mask processing.
+pub struct MorphologicalOps;
+
+impl MorphologicalOps {
+    /// Dilate a binary mask by a square structuring element of the given radius.
+    ///
+    /// Expands foreground regions outward by `radius` pixels.
+    pub fn dilate(mask: &[Vec<bool>], radius: usize) -> Vec<Vec<bool>> {
+        let height = mask.len();
+        if height == 0 {
+            return Vec::new();
+        }
+        let width = mask[0].len();
+        let mut result = vec![vec![false; width]; height];
+
+        for y in 0..height {
+            for x in 0..width {
+                if !mask[y][x] {
+                    continue;
+                }
+                let y_start = y.saturating_sub(radius);
+                let y_end = (y + radius).min(height - 1) + 1;
+                let x_start = x.saturating_sub(radius);
+                let x_end = (x + radius).min(width - 1) + 1;
+                for yy in y_start..y_end {
+                    for xx in x_start..x_end {
+                        result[yy][xx] = true;
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    /// Erode a binary mask by a square structuring element of the given radius.
+    ///
+    /// Shrinks foreground regions; a pixel remains foreground only if all
+    /// pixels within `radius` are foreground.
+    pub fn erode(mask: &[Vec<bool>], radius: usize) -> Vec<Vec<bool>> {
+        let height = mask.len();
+        if height == 0 {
+            return Vec::new();
+        }
+        let width = mask[0].len();
+        let mut result = vec![vec![false; width]; height];
+
+        for y in 0..height {
+            for x in 0..width {
+                if !mask[y][x] {
+                    continue;
+                }
+                let mut all_foreground = true;
+                let y_start = y.saturating_sub(radius);
+                let y_end = (y + radius).min(height - 1) + 1;
+                let x_start = x.saturating_sub(radius);
+                let x_end = (x + radius).min(width - 1) + 1;
+                for yy in y_start..y_end {
+                    for xx in x_start..x_end {
+                        if !mask[yy][xx] {
+                            all_foreground = false;
+                            break;
+                        }
+                    }
+                    if !all_foreground {
+                        break;
+                    }
+                }
+                if all_foreground {
+                    result[y][x] = true;
+                }
+            }
+        }
+        result
+    }
+
+    /// Opening: erosion followed by dilation. Removes small noise.
+    pub fn open(mask: &[Vec<bool>], radius: usize) -> Vec<Vec<bool>> {
+        let eroded = Self::erode(mask, radius);
+        Self::dilate(&eroded, radius)
+    }
+
+    /// Closing: dilation followed by erosion. Fills small holes.
+    pub fn close(mask: &[Vec<bool>], radius: usize) -> Vec<Vec<bool>> {
+        let dilated = Self::dilate(mask, radius);
+        Self::erode(&dilated, radius)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Mask quality metrics
+// ---------------------------------------------------------------------------
+
+/// Quality metrics for evaluating a binary mask.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MaskQualityMetrics {
+    /// Fraction of pixels classified as foreground (valid).
+    pub foreground_fraction: f64,
+    /// Number of connected components.
+    pub component_count: usize,
+    /// Largest component area.
+    pub largest_component_area: usize,
+    /// Mean component area.
+    pub mean_component_area: f64,
+    /// Component area standard deviation.
+    pub component_area_std: f64,
+    /// Mask entropy (Shannon entropy of foreground/background distribution).
+    pub entropy: f64,
+    /// Spatial uniformity (1.0 = perfectly uniform, 0.0 = highly clustered).
+    pub spatial_uniformity: f64,
+    /// Boundary complexity (perimeter / area ratio of foreground).
+    pub boundary_complexity: f64,
+}
+
+impl MaskQualityMetrics {
+    /// Returns an overall quality score (0.0 = poor, 1.0 = excellent).
+    pub fn quality_score(&self) -> f64 {
+        // Balanced score: good foreground fraction, low fragmentation,
+        // high spatial uniformity, reasonable boundary complexity.
+        let fg_score = if self.foreground_fraction > 0.05 && self.foreground_fraction < 0.95 {
+            1.0 - (self.foreground_fraction - 0.5).abs() * 2.0
+        } else {
+            0.2
+        };
+        let fragmentation_score = if self.component_count > 0 {
+            1.0 / (1.0
+                + self.component_area_std / self.mean_component_area.max(1.0))
+        } else {
+            1.0
+        };
+        (fg_score * 0.4 + fragmentation_score * 0.3 + self.spatial_uniformity * 0.3)
+            .clamp(0.0, 1.0)
+    }
+}
+
+/// Computes quality metrics for a binary mask.
+pub fn compute_mask_quality(
+    mask: &[Vec<bool>],
+    _intensities: Option<&[Vec<f64>]>,
+) -> MaskQualityMetrics {
+    let height = mask.len();
+    let width = if height > 0 { mask[0].len() } else { 0 };
+    let total = width * height;
+
+    if total == 0 {
+        return MaskQualityMetrics {
+            foreground_fraction: 0.0,
+            component_count: 0,
+            largest_component_area: 0,
+            mean_component_area: 0.0,
+            component_area_std: 0.0,
+            entropy: 0.0,
+            spatial_uniformity: 0.0,
+            boundary_complexity: 0.0,
+        };
+    }
+
+    let mut foreground = 0usize;
+    for row in mask.iter() {
+        for &v in row.iter() {
+            if v {
+                foreground += 1;
+            }
+        }
+    }
+    let foreground_fraction = foreground as f64 / total as f64;
+
+    // Entropy of foreground/background distribution.
+    let p_fg = foreground_fraction;
+    let p_bg = 1.0 - p_fg;
+    let entropy = if p_fg > 0.0 && p_bg > 0.0 {
+        -(p_fg * p_fg.ln() + p_bg * p_bg.ln())
+    } else {
+        0.0
+    };
+
+    // Connected components.
+    let labeler = ConnectedComponentLabeler::default();
+    let components = labeler.label(mask);
+    let component_count = components.len();
+    let largest_component_area = components.iter().map(|c| c.area).max().unwrap_or(0);
+    let mean_component_area = if component_count > 0 {
+        components.iter().map(|c| c.area).sum::<usize>() as f64 / component_count as f64
+    } else {
+        0.0
+    };
+    let component_area_std = if component_count > 1 {
+        let mean = mean_component_area;
+        let var = components
+            .iter()
+            .map(|c| (c.area as f64 - mean).powi(2))
+            .sum::<f64>()
+            / (component_count - 1) as f64;
+        var.sqrt()
+    } else {
+        0.0
+    };
+
+    // Spatial uniformity: measure clustering via nearest-neighbor distance variance.
+    let spatial_uniformity = if component_count > 1 {
+        let centroids: Vec<(f64, f64)> = components.iter().map(|c| c.centroid).collect();
+        let mut distances = Vec::new();
+        for i in 0..centroids.len() {
+            for j in (i + 1)..centroids.len() {
+                let dx = centroids[i].0 - centroids[j].0;
+                let dy = centroids[i].1 - centroids[j].1;
+                distances.push((dx * dx + dy * dy).sqrt());
+            }
+        }
+        if distances.len() > 1 {
+            let mean_d = distances.iter().sum::<f64>() / distances.len() as f64;
+            let var_d = distances
+                .iter()
+                .map(|d| (d - mean_d).powi(2))
+                .sum::<f64>()
+                / (distances.len() - 1) as f64;
+            let cv = if mean_d > 0.0 { var_d.sqrt() / mean_d } else { 0.0 };
+            (1.0 / (1.0 + cv)).clamp(0.0, 1.0)
+        } else {
+            1.0
+        }
+    } else {
+        1.0
+    };
+
+    // Boundary complexity: approximate perimeter / area.
+    let boundary_complexity = if foreground > 0 {
+        let mut perimeter = 0usize;
+        for y in 0..height {
+            for x in 0..width {
+                if !mask[y][x] {
+                    continue;
+                }
+                // Count edges adjacent to background or image boundary.
+                if x == 0 || !mask[y][x - 1] {
+                    perimeter += 1;
+                }
+                if x + 1 >= width || !mask[y][x + 1] {
+                    perimeter += 1;
+                }
+                if y == 0 || !mask[y - 1][x] {
+                    perimeter += 1;
+                }
+                if y + 1 >= height || !mask[y + 1][x] {
+                    perimeter += 1;
+                }
+            }
+        }
+        perimeter as f64 / foreground as f64
+    } else {
+        0.0
+    };
+
+    MaskQualityMetrics {
+        foreground_fraction,
+        component_count,
+        largest_component_area,
+        mean_component_area,
+        component_area_std,
+        entropy,
+        spatial_uniformity,
+        boundary_complexity,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Mask set operations (AND, OR, XOR, NOT)
+// ---------------------------------------------------------------------------
+
+/// Combines two binary masks using a boolean operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaskOp {
+    /// Logical AND — intersection of foreground regions.
+    And,
+    /// Logical OR — union of foreground regions.
+    Or,
+    /// Logical XOR — symmetric difference.
+    Xor,
+    /// Logical NOT — invert the first mask (second ignored).
+    Not,
+}
+
+/// Apply a boolean operation between two masks of the same dimensions.
+pub fn combine_masks(
+    a: &[Vec<bool>],
+    b: &[Vec<bool>],
+    op: MaskOp,
+) -> Vec<Vec<bool>> {
+    let height = a.len();
+    if height == 0 {
+        return Vec::new();
+    }
+    let width = a[0].len();
+    let mut result = vec![vec![false; width]; height];
+
+    for y in 0..height {
+        for x in 0..width {
+            let av = if y < b.len() && x < b[y].len() { b[y][x] } else { false };
+            let bv = a[y][x];
+            result[y][x] = match op {
+                MaskOp::And => av && bv,
+                MaskOp::Or => av || bv,
+                MaskOp::Xor => av ^ bv,
+                MaskOp::Not => !av,
+            };
+        }
+    }
+    result
+}
+
+// ---------------------------------------------------------------------------
+// Regional intensity statistics
+// ---------------------------------------------------------------------------
+
+/// Statistics computed over a specific region of an intensity field.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RegionalStatistics {
+    /// Region label.
+    pub label: u32,
+    /// Pixel count.
+    pub count: usize,
+    /// Mean intensity.
+    pub mean: f64,
+    /// Variance.
+    pub variance: f64,
+    /// Standard deviation.
+    pub std_dev: f64,
+    /// Minimum intensity.
+    pub min: f64,
+    /// Maximum intensity.
+    pub max: f64,
+    /// Median intensity.
+    pub median: f64,
+}
+
+impl RegionalStatistics {
+    /// Returns the coefficient of variation (std / mean).
+    pub fn cv(&self) -> f64 {
+        if self.mean.abs() < 1e-10 {
+            return 0.0;
+        }
+        self.std_dev / self.mean.abs()
+    }
+}
+
+/// Compute statistics for each labeled component over an intensity field.
+pub fn compute_regional_statistics(
+    components: &[LabeledComponent],
+    intensities: &[Vec<f64>],
+) -> Vec<RegionalStatistics> {
+    let mut stats = Vec::with_capacity(components.len());
+    for comp in components.iter() {
+        let mut values: Vec<f64> = Vec::with_capacity(comp.pixels.len());
+        for &(x, y) in comp.pixels.iter() {
+            if y < intensities.len() && x < intensities[y].len() {
+                values.push(intensities[y][x]);
+            }
+        }
+        if values.is_empty() {
+            stats.push(RegionalStatistics {
+                label: comp.label,
+                count: 0,
+                mean: 0.0,
+                variance: 0.0,
+                std_dev: 0.0,
+                min: 0.0,
+                max: 0.0,
+                median: 0.0,
+            });
+            continue;
+        }
+        let count = values.len();
+        let sum: f64 = values.iter().sum();
+        let mean = sum / count as f64;
+        let variance = values
+            .iter()
+            .map(|v| (v - mean).powi(2))
+            .sum::<f64>()
+            / count as f64;
+        let std_dev = variance.sqrt();
+        let mut sorted = values.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let median = if count % 2 == 0 {
+            (sorted[count / 2 - 1] + sorted[count / 2]) / 2.0
+        } else {
+            sorted[count / 2]
+        };
+        let min = values.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        stats.push(RegionalStatistics {
+            label: comp.label,
+            count,
+            mean,
+            variance,
+            std_dev,
+            min,
+            max,
+            median,
+        });
+    }
+    stats
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
