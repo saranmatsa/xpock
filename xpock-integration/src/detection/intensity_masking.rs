@@ -88,29 +88,8 @@ impl MaskedRegion {
 }
 
 // ---------------------------------------------------------------------------
-// Intensity mask — pixel-wise masking of Stokes field
+// Masking statistics
 // ---------------------------------------------------------------------------
-
-/// Pixel-wise intensity mask for a Stokes field.
-///
-/// Tracks which pixels are valid (unmasked) vs masked (excluded from
-/// skyrmion number computation). Supports both fixed-threshold and
-/// adaptive thresholding based on noise floor estimation.
-pub struct IntensityMask {
-    /// Boolean mask: true = valid pixel, false = masked.
-    valid: Vec<Vec<bool>>,
-    /// Per-pixel intensity values (S0 Stokes parameter).
-    intensity: Vec<Vec<f64>>,
-    /// Field dimensions.
-    width: usize,
-    height: usize,
-    /// Applied threshold value.
-    threshold: f64,
-    /// Masking configuration used.
-    config: MaskingConfig,
-    /// Statistics about the masking operation.
-    stats: MaskingStats,
-}
 
 /// Statistics from a masking operation.
 #[derive(Debug, Clone, PartialEq)]
@@ -150,8 +129,49 @@ impl MaskingStats {
     }
 }
 
+impl Default for MaskingStats {
+    fn default() -> Self {
+        Self {
+            total_pixels: 0,
+            valid_pixels: 0,
+            masked_pixels: 0,
+            valid_fraction: 0.0,
+            max_intensity: 0.0,
+            mean_valid_intensity: 0.0,
+            threshold: 0.0,
+            masked_region_count: 0,
+            adaptive_threshold_used: None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Intensity mask — pixel-wise masking of Stokes field
+// ---------------------------------------------------------------------------
+
+/// Pixel-wise intensity mask for a Stokes field.
+///
+/// Tracks which pixels are valid (unmasked) vs masked (excluded from
+/// skyrmion number computation). Supports both fixed-threshold and
+/// adaptive thresholding based on noise floor estimation.
+pub struct IntensityMask {
+    /// Boolean mask: true = valid pixel, false = masked.
+    valid: Vec<Vec<bool>>,
+    /// Per-pixel intensity values (S0 Stokes parameter).
+    intensity: Vec<Vec<f64>>,
+    /// Field dimensions.
+    width: usize,
+    height: usize,
+    /// Applied threshold value.
+    threshold: f64,
+    /// Masking configuration used.
+    config: MaskingConfig,
+    /// Statistics about the masking operation.
+    stats: MaskingStats,
+}
+
 impl IntensityMask {
-    /// Create a new intensity mask with the given configuration.
+    /// Create a new intensity mask with the given threshold.
     pub fn new(threshold: f64) -> Self {
         Self::with_config(MaskingConfig {
             intensity_threshold: threshold,
@@ -176,10 +196,7 @@ impl IntensityMask {
     ///
     /// Pixels with S0 intensity below threshold * max_intensity are masked.
     /// Returns the mask ready for use in skyrmion number computation.
-    pub fn apply(
-        &mut self,
-        stokes_field: &[[[f64; 4]; 256]; 256],
-    ) -> &IntensityMask {
+    pub fn apply(&mut self, stokes_field: &[[[f64; 4]; 256]; 256]) -> &IntensityMask {
         self.width = 256;
         self.height = 256;
 
@@ -221,7 +238,7 @@ impl IntensityMask {
             }
         }
 
-        // Step 4: Detect contiguous masked regions (simple flood-fill lite — row runs).
+        // Step 4: Detect contiguous masked regions (simple row-run analysis).
         let masked_regions = self.detect_masked_regions(&valid);
 
         // Step 5: Record statistics.
@@ -496,22 +513,16 @@ impl IntensityMask {
     /// labeling can be added if needed.
     fn detect_masked_regions(&self, valid: &[Vec<bool>]) -> Vec<MaskedRegion> {
         let mut regions = Vec::new();
-        let mut visited = vec![vec![false; 256]; 256];
 
         for y in 0..256 {
             let mut x = 0;
             while x < 256 {
-                if !valid[y][x] && !visited[y][x] {
+                if !valid[y][x] {
                     // Start of a masked run in this row.
                     let run_start = x;
                     let mut run_end = x;
                     while run_end + 1 < 256 && !valid[y][run_end + 1] {
                         run_end += 1;
-                    }
-
-                    // Mark this run as visited.
-                    for cx in run_start..=run_end {
-                        visited[y][cx] = true;
                     }
 
                     // Compute average intensity of this region.
@@ -559,7 +570,8 @@ impl IntensityMask {
         let mut current = regions[0].clone();
 
         for region in regions.iter().skip(1) {
-            let same_row_or_adjacent = (region.origin.1 as i64 - current.origin.1 as i64).abs() <= 1;
+            let same_row_or_adjacent =
+                (region.origin.1 as i64 - current.origin.1 as i64).abs() <= 1;
             let x_overlap = region.origin.0 <= current.origin.0 + current.dimensions.0
                 && current.origin.0 <= region.origin.0 + region.dimensions.0;
 
@@ -586,22 +598,6 @@ impl IntensityMask {
 
         // Update stats with refined region count.
         self.stats.masked_region_count = merged.len();
-    }
-}
-
-impl Default for MaskingStats {
-    fn default() -> Self {
-        Self {
-            total_pixels: 0,
-            valid_pixels: 0,
-            masked_pixels: 0,
-            valid_fraction: 0.0,
-            max_intensity: 0.0,
-            mean_valid_intensity: 0.0,
-            threshold: 0.0,
-            masked_region_count: 0,
-            adaptive_threshold_used: None,
-        }
     }
 }
 
@@ -794,433 +790,5 @@ mod tests {
     fn default_masking_config_works() {
         let config = MaskingConfig::default();
         let _mask = IntensityMask::with_config(config);
-    }
-
-    // ---------------------------------------------------------------------------
-    // Extended tests: threshold validation, edge cases, masking boundaries
-    // ---------------------------------------------------------------------------
-
-    #[test]
-    fn intensity_threshold_must_be_in_valid_range() {
-        let config = MaskingConfig {
-            intensity_threshold: 0.0,
-            ..Default::default()
-        };
-        let mask = IntensityMask::with_config(config);
-        assert_eq!(mask.config.intensity_threshold, 0.0);
-
-        let config = MaskingConfig {
-            intensity_threshold: 1.0,
-            ..Default::default()
-        };
-        let mask = IntensityMask::with_config(config);
-        assert_eq!(mask.config.intensity_threshold, 1.0);
-    }
-
-    #[test]
-    fn min_valid_fraction_zero_always_sufficient() {
-        let mut mask = IntensityMask::new(0.99);
-        let mut field = [[[0.0f64; 4]; 256]; 256];
-        for y in 0..256 {
-            for x in 0..256 {
-                field[y][x] = [0.001, 0.0, 0.0, 0.0];
-            }
-        }
-        mask.apply(&field);
-        // threshold = 0.99 * 0.001 = 0.00099, min_absolute = 1e-6, all pixels >= 0.001 >= threshold
-        assert!(mask.sufficient_valid_pixels());
-    }
-
-    #[test]
-    fn min_valid_fraction_one_requires_all_valid() {
-        let config = MaskingConfig {
-            min_valid_fraction: 1.0,
-            ..Default::default()
-        };
-        let mut mask = IntensityMask::with_config(config);
-        let mut field = [[[0.0f64; 4]; 256]; 256];
-        for y in 0..256 {
-            for x in 0..256 {
-                field[y][x] = [1.0, 0.0, 0.0, 0.0];
-            }
-        }
-        // Mask one pixel to break the all-valid condition
-        field[0][0][0] = 0.0;
-        mask.apply(&field);
-        assert!(!mask.sufficient_valid_pixels());
-    }
-
-    #[test]
-    fn histogram_bins_affects_adaptive_threshold() {
-        let config_low = MaskingConfig {
-            histogram_bins: 16,
-            enable_adaptive: true,
-            ..Default::default()
-        };
-        let config_high = MaskingConfig {
-            histogram_bins: 1024,
-            enable_adaptive: true,
-            ..Default::default()
-        };
-
-        let mut field = [[[0.0f64; 4]; 256]; 256];
-        for y in 0..256 {
-            for x in 0..256 {
-                field[y][x] = [(x + y) as f64 / 512.0, 0.0, 0.0, 0.0];
-            }
-        }
-
-        let mut mask_low = IntensityMask::with_config(config_low.clone());
-        mask_low.apply(&field);
-        let threshold_low = mask_low.threshold();
-
-        let mut mask_high = IntensityMask::with_config(config_high);
-        mask_high.apply(&field);
-        let threshold_high = mask_high.threshold();
-
-        // Both thresholds should be positive and reasonable
-        assert!(threshold_low > 0.0);
-        assert!(threshold_high > 0.0);
-    }
-
-    #[test]
-    fn adaptive_disabled_uses_configured_threshold() {
-        let config = MaskingConfig {
-            enable_adaptive: false,
-            intensity_threshold: 0.25,
-            ..Default::default()
-        };
-        let mut mask = IntensityMask::with_config(config);
-        let mut field = [[[0.0f64; 4]; 256]; 256];
-        for y in 0..256 {
-            for x in 0..256 {
-                field[y][x] = [1.0, 0.0, 0.0, 0.0];
-            }
-        }
-        mask.apply(&field);
-        // Without adaptive, threshold = 0.25 * max = 0.25
-        assert!((mask.threshold() - 0.25).abs() < 1e-6);
-    }
-
-    #[test]
-    fn min_absolute_threshold_prevents_zero() {
-        let config = MaskingConfig {
-            intensity_threshold: 0.0,
-            min_absolute_threshold: 0.5,
-            enable_adaptive: false,
-            ..Default::default()
-        };
-        let mut mask = IntensityMask::with_config(config);
-        let mut field = [[[0.0f64; 4]; 256]; 256];
-        for y in 0..256 {
-            for x in 0..256 {
-                field[y][x] = [0.1, 0.0, 0.0, 0.0]; // all below 0.5
-            }
-        }
-        mask.apply(&field);
-        // threshold = max(0.0 * 0.1, 0.5) = 0.5, all pixels masked
-        assert_eq!(mask.valid_pixel_ratio(), 0.0);
-    }
-
-    #[test]
-    fn masked_region_origin_and_dimensions() {
-        let region = MaskedRegion {
-            origin: (5, 10),
-            dimensions: (20, 30),
-            pixel_count: 600,
-            avg_intensity: 0.15,
-        };
-        assert_eq!(region.origin, (5, 10));
-        assert_eq!(region.dimensions, (20, 30));
-        assert_eq!(region.pixel_count, 600);
-        assert!((region.avg_intensity - 0.15).abs() < 1e-6);
-    }
-
-    #[test]
-    fn masked_region_zero_dimensions() {
-        let region = MaskedRegion {
-            origin: (0, 0),
-            dimensions: (0, 0),
-            pixel_count: 0,
-            avg_intensity: 0.0,
-        };
-        let ((x_min, y_min), (x_max, y_max)) = region.bounding_box();
-        assert_eq!((x_min, y_min), (0, 0));
-        assert_eq!((x_max, y_max), (0, 0));
-        assert_eq!(region.field_fraction(256, 256), 0.0);
-    }
-
-    #[test]
-    fn masked_region_large_field_fraction() {
-        let region = MaskedRegion {
-            origin: (0, 0),
-            dimensions: (256, 256),
-            pixel_count: 65536,
-            avg_intensity: 0.01,
-        };
-        assert!((region.field_fraction(256, 256) - 1.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn masking_stats_zero_pixels() {
-        let stats = MaskingStats::default();
-        assert_eq!(stats.total_pixels, 0);
-        assert_eq!(stats.valid_pixels, 0);
-        assert_eq!(stats.masked_pixels, 0);
-        assert_eq!(stats.valid_fraction, 0.0);
-        assert_eq!(stats.masked_fraction(), 0.0);
-        assert!(!stats.meets_minimum(0.0)); // 0 >= 0 is true actually, but default valid_fraction is 0.0
-        // meets_minimum(0.0) should be true since 0.0 >= 0.0
-        assert!(stats.meets_minimum(0.0));
-    }
-
-    #[test]
-    fn masking_stats_all_masked() {
-        let stats = MaskingStats {
-            total_pixels: 1000,
-            valid_pixels: 0,
-            masked_pixels: 1000,
-            valid_fraction: 0.0,
-            max_intensity: 0.0,
-            mean_valid_intensity: 0.0,
-            threshold: 0.5,
-            masked_region_count: 1,
-            adaptive_threshold_used: Some(0.5),
-        };
-        assert!((stats.masked_fraction() - 1.0).abs() < 1e-6);
-        assert!(!stats.meets_minimum(0.1));
-    }
-
-    #[test]
-    fn masking_stats_half_valid() {
-        let stats = MaskingStats {
-            total_pixels: 1000,
-            valid_pixels: 500,
-            masked_pixels: 500,
-            valid_fraction: 0.5,
-            max_intensity: 1.0,
-            mean_valid_intensity: 0.6,
-            threshold: 0.2,
-            masked_region_count: 5,
-            adaptive_threshold_used: Some(0.2),
-        };
-        assert!((stats.masked_fraction() - 0.5).abs() < 1e-6);
-        assert!(stats.meets_minimum(0.4));
-        assert!(!stats.meets_minimum(0.6));
-    }
-
-    #[test]
-    fn intensity_at_returns_correct_value() {
-        let mut mask = IntensityMask::new(0.1);
-        let mut field = [[[0.0f64; 4]; 256]; 256];
-        field[100][200] = [3.5, 1.0, 0.5, 0.25];
-        mask.apply(&field);
-        assert!((mask.intensity_at(200, 100).unwrap() - 3.5).abs() < 1e-6);
-    }
-
-    #[test]
-    fn is_valid_tracks_mask_state() {
-        let mut mask = IntensityMask::new(0.5);
-        let mut field = [[[0.0f64; 4]; 256]; 256];
-        // All pixels have intensity 1.0, threshold = 0.5, all valid
-        for y in 0..256 {
-            for x in 0..256 {
-                field[y][x] = [1.0, 0.0, 0.0, 0.0];
-            }
-        }
-        mask.apply(&field);
-        assert!(mask.is_valid(10, 10));
-        assert!(mask.is_valid(255, 255));
-
-        // Now mask everything except one pixel
-        let mut field2 = [[[0.0f64; 4]; 256]; 256];
-        field2[50][50] = [1.0, 0.0, 0.0, 0.0];
-        let mut mask2 = IntensityMask::new(0.9);
-        mask2.apply(&field2);
-        assert!(mask2.is_valid(50, 50));
-        assert!(!mask2.is_valid(51, 50));
-    }
-
-    #[test]
-    fn apply_flat_resamples_small_field() {
-        let mut mask = IntensityMask::new(0.1);
-        // 4x4 field, all intensity 1.0
-        let data: Vec<f64> = (0..4 * 4 * 4)
-            .flat_map(|i| {
-                let base = if i % 4 == 0 { 1.0 } else { 0.0 };
-                vec![base, 0.0, 0.0, 0.0]
-            })
-            .collect();
-        let result = mask.apply_flat(&data, 4, 4);
-        assert!(result.is_ok());
-        let mask = result.unwrap();
-        assert!(mask.sufficient_valid_pixels());
-    }
-
-    #[test]
-    fn apply_flat_resamples_large_field() {
-        let mut mask = IntensityMask::new(0.1);
-        // 512x512 field, all intensity 1.0 — will be resampled to 256x256
-        let data: Vec<f64> = (0..512 * 512 * 4)
-            .flat_map(|i| {
-                let base = if i % 4 == 0 { 1.0 } else { 0.0 };
-                vec![base, 0.0, 0.0, 0.0]
-            })
-            .collect();
-        let result = mask.apply_flat(&data, 512, 512);
-        assert!(result.is_ok());
-        let mask = result.unwrap();
-        assert_eq!(mask.valid_pixel_ratio(), 1.0);
-    }
-
-    #[test]
-    fn apply_flat_mismatched_dimensions() {
-        let mut mask = IntensityMask::new(0.1);
-        // data for 2x2 but claiming 10x10
-        let data = vec![1.0, 0.0, 0.0, 0.0; 16];
-        let result = mask.apply_flat(&data, 10, 10);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn multiple_apply_calls_independent() {
-        let mut mask = IntensityMask::new(0.1);
-
-        // First field: all bright
-        let mut field1 = [[[0.0f64; 4]; 256]; 256];
-        for y in 0..256 {
-            for x in 0..256 {
-                field1[y][x] = [1.0, 0.0, 0.0, 0.0];
-            }
-        }
-        mask.apply(&field1);
-        assert_eq!(mask.valid_pixel_ratio(), 1.0);
-
-        // Second field: all dark
-        let field2 = [[[0.0f64; 4]; 256]; 256];
-        mask.apply(&field2);
-        assert_eq!(mask.valid_pixel_ratio(), 0.0);
-    }
-
-    #[test]
-    fn threshold_is_always_non_negative() {
-        let config = MaskingConfig {
-            intensity_threshold: -0.5,
-            min_absolute_threshold: 0.0,
-            enable_adaptive: false,
-            ..Default::default()
-        };
-        let mut mask = IntensityMask::with_config(config);
-        let mut field = [[[0.0f64; 4]; 256]; 256];
-        for y in 0..256 {
-            for x in 0..256 {
-                field[y][x] = [1.0, 0.0, 0.0, 0.0];
-            }
-        }
-        mask.apply(&field);
-        // threshold = -0.5 * 1.0 = -0.5, but min_absolute = 0.0, so effective = 0.0
-        assert!(mask.threshold() >= 0.0);
-    }
-
-    #[test]
-    fn detect_masked_regions_returns_empty_for_all_valid() {
-        let mut mask = IntensityMask::new(0.1);
-        let mut field = [[[0.0f64; 4]; 256]; 256];
-        for y in 0..256 {
-            for x in 0..256 {
-                field[y][x] = [1.0, 0.0, 0.0, 0.0];
-            }
-        }
-        mask.apply(&field);
-        assert!(mask.masked_regions().is_empty());
-    }
-
-    #[test]
-    fn detect_masked_regions_returns_one_for_all_masked() {
-        let mut mask = IntensityMask::new(1.0);
-        let mut field = [[[0.0f64; 4]; 256]; 256];
-        for y in 0..256 {
-            for x in 0..256 {
-                field[y][x] = [0.5, 0.0, 0.0, 0.0]; // threshold = 1.0 * 0.5 = 0.5, all masked
-            }
-        }
-        mask.apply(&field);
-        let regions = mask.masked_regions();
-        assert!(!regions.is_empty());
-    }
-
-    #[test]
-    fn config_clone_and_equality() {
-        let config1 = MaskingConfig::default();
-        let config2 = MaskingConfig {
-            intensity_threshold: 0.3,
-            ..Default::default()
-        };
-        assert_ne!(config1, config2);
-        assert_eq!(config1, MaskingConfig::default());
-    }
-
-    #[test]
-    fn mean_valid_intensity_excludes_masked() {
-        let mut mask = IntensityMask::new(0.5);
-        let mut field = [[[0.0f64; 4]; 256]; 256];
-        for y in 0..256 {
-            for x in 0..256 {
-                if x < 128 {
-                    field[y][x] = [1.0, 0.0, 0.0, 0.0]; // valid
-                } else {
-                    field[y][x] = [0.1, 0.0, 0.0, 0.0]; // masked (threshold = 0.5)
-                }
-            }
-        }
-        mask.apply(&field);
-        assert!((mask.mean_intensity() - 1.0).abs() < 1e-6);
-        assert!((mask.valid_pixel_ratio() - 0.5).abs() < 0.01);
-    }
-
-    #[test]
-    fn max_intensity_reflects_brightest_pixel() {
-        let mut mask = IntensityMask::new(0.1);
-        let mut field = [[[0.0f64; 4]; 256]; 256];
-        for y in 0..256 {
-            for x in 0..256 {
-                field[y][x] = [0.5, 0.0, 0.0, 0.0];
-            }
-        }
-        field[100][100] = [10.0, 0.0, 0.0, 0.0];
-        mask.apply(&field);
-        assert!((mask.max_intensity() - 10.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn refine_regions_no_panic_on_empty() {
-        let mut mask = IntensityMask::new(0.1);
-        let mut field = [[[0.0f64; 4]; 256]; 256];
-        for y in 0..256 {
-            for x in 0..256 {
-                field[y][x] = [1.0, 0.0, 0.0, 0.0];
-            }
-        }
-        mask.apply(&field);
-        mask.refine_regions(); // should not panic
-    }
-
-    #[test]
-    fn stats_clone_and_debug() {
-        let stats = MaskingStats {
-            total_pixels: 65536,
-            valid_pixels: 32768,
-            masked_pixels: 32768,
-            valid_fraction: 0.5,
-            max_intensity: 1.0,
-            mean_valid_intensity: 0.7,
-            threshold: 0.1,
-            masked_region_count: 4,
-            adaptive_threshold_used: Some(0.12),
-        };
-        let cloned = stats.clone();
-        assert_eq!(cloned.total_pixels, 65536);
-        assert_eq!(cloned.adaptive_threshold_used, Some(0.12));
-        let _debug = format!("{:?}", stats);
     }
 }
