@@ -57,6 +57,19 @@ class TurbulenceConfig:
     outer_scale: float = 10.0  # 10 m
     n_screens: int = 10
     seed: Optional[int] = None
+    amplitude_turbulence: bool = True
+        # Include log-amplitude fluctuations (scintillation) in addition to
+        # phase turbulence. When True, each screen applies both a random phase
+        # and a random log-amplitude modulation, drawn from the von Karman
+        # spectrum with Var(chi) = amplitude_scale * Var(phi).
+        # When False, only phase screens are applied (scalar phase turbulence),
+        # which preserves polarization and total power exactly — an
+        # idealization that makes SKM and intensity appear artificially robust.
+    amplitude_scale: float = 0.189
+        # Ratio Var(chi) / Var(phi) for log-amplitude vs phase fluctuations.
+        # From Rytov theory for weak turbulence: D_chi(r) / D_phi(r) =
+        # 0.55 / 2.91 ≈ 0.189. This gives scintillation index sigma_I^2 =
+        # sigma_R^2 in the weak-turbulence limit.
 
 
 @dataclass
@@ -168,18 +181,102 @@ class TurbulenceModel:
 
         return phase_screen
 
+    def generate_amplitude_screen(
+        self, shape: Tuple[int, int], dx: float, dz: float
+    ) -> np.ndarray:
+        """Generate a single Kolmogorov log-amplitude (scintillation) screen.
+
+        The log-amplitude fluctuation chi is drawn from the same von Karman
+        spectrum as the phase, scaled by amplitude_scale so that
+        Var(chi) = amplitude_scale * Var(phi). In the weak-turbulence limit
+        this yields scintillation index sigma_I^2 = sigma_R^2.
+
+        Parameters
+        ----------
+        shape : (ny, nx)
+            Grid shape in (y, x) order.
+        dx : float
+            Spatial sampling interval in meters (assumed square pixels).
+        dz : float
+            Propagation distance for this screen in meters.
+
+        Returns
+        -------
+        chi : (ny, nx) float array
+            Log-amplitude screen (dimensionless). Field is multiplied by
+            exp(chi) to apply amplitude fluctuations.
+        """
+        ny, nx = shape
+        kx = 2.0 * np.pi * fftfreq(nx, dx)
+        ky = 2.0 * np.pi * fftfreq(ny, dy if False else dx)
+        KX, KY = np.meshgrid(kx, ky)
+        K = np.sqrt(KX**2 + KY**2)
+
+        km = 5.92 / self.cfg.inner_scale
+        k0 = 2.0 * np.pi / self.cfg.outer_scale
+
+        K_safe = np.where(K == 0, 1.0, K)
+        phi_n = (
+            0.033
+            * self.cfg.cn2
+            * dz
+            * K_safe ** (-11.0 / 3.0)
+            * np.exp(-(K_safe / km) ** 2)
+        )
+        phi_n = np.where(K < k0, 0.0, phi_n)
+
+        dkx = kx[1] - kx[0] if nx > 1 else 1.0
+        dky = ky[1] - ky[0] if ny > 1 else 1.0
+        dk_area = dkx * dky
+
+        rng = self._rng
+        amp_random = rng.standard_normal((ny, nx)) + 1j * rng.standard_normal(
+            (ny, nx)
+        )
+        amp_screen_ft = amp_random * np.sqrt(phi_n * dk_area)
+
+        # Inverse FFT to get log-amplitude screen
+        chi_screen = np.real(ifft2(amp_screen_ft))
+
+        # Normalize to theoretical amplitude variance:
+        # Var(chi) = amplitude_scale * ∫ Φ_OPD(κ) d²κ
+        # NOTE: chi is dimensionless (log-amplitude), so NO (2π/λ) factor.
+        # Phase gets (2π/λ) because phi = 2π·OPD/λ, but chi is already
+        # in fractional amplitude units.
+        k_area_integral = float(np.sum(phi_n) * dk_area)
+        if k_area_integral > 0:
+            sigma_chi_theoretical = np.sqrt(
+                self.cfg.amplitude_scale * k_area_integral
+            )
+            sigma_chi_raw = float(np.std(chi_screen))
+            if sigma_chi_raw > 1e-15:
+                chi_screen = chi_screen * (
+                    sigma_chi_theoretical / sigma_chi_raw
+                )
+
+        return chi_screen
+
     def propagate(
         self,
         field: np.ndarray,
         x: np.ndarray,
         y: np.ndarray,
         phase_screens: Optional[List[np.ndarray]] = None,
+        amplitude_screens: Optional[List[np.ndarray]] = None,
     ) -> np.ndarray:
         """Propagate complex field through turbulent atmosphere.
 
         Uses split-step Fourier method: alternate free-space (Fresnel)
-        propagation over dz/2 with phase screen application, repeated
+        propagation over dz/2 with screen application, repeated
         n_screens times.
+
+        When ``amplitude_turbulence`` is True, each step applies both a
+        phase screen and a log-amplitude screen:
+            E = E * exp(chi + i * phi)
+        This causes scintillation (intensity fluctuations) in addition to
+        phase distortion. When False, only phase screens are applied
+        (scalar phase turbulence), which preserves polarization and total
+        power exactly.
 
         Parameters
         ----------
@@ -192,8 +289,11 @@ class TurbulenceModel:
         phase_screens : list of (ny, nx) arrays, optional
             Pre-generated phase screens, one per propagation step.
             If None, a new random screen is generated for each step.
-            The same screen list must be used for Ex and Ey to preserve
-            polarization relationships.
+        amplitude_screens : list of (ny, nx) arrays, optional
+            Pre-generated log-amplitude screens, one per propagation step.
+            Required when amplitude_turbulence is True and phase_screens
+            are provided. If None and amplitude_turbulence is True, new
+            random amplitude screens are generated for each step.
 
         Returns
         -------
@@ -233,12 +333,27 @@ class TurbulenceModel:
             E_hat = E_hat * H
             E = ifft2(E_hat)
 
-            # Apply phase screen
-            if phase_screens is not None:
-                phi = phase_screens[step]
+            # Apply screens
+            if self.cfg.amplitude_turbulence:
+                # Phase screen
+                if phase_screens is not None:
+                    phi = phase_screens[step]
+                else:
+                    phi = self.generate_phase_screen((ny, nx), d, dz)
+                # Log-amplitude screen
+                if amplitude_screens is not None:
+                    chi = amplitude_screens[step]
+                else:
+                    chi = self.generate_amplitude_screen((ny, nx), d, dz)
+                # Combined complex screen: E = E * exp(chi + i*phi)
+                E = E * np.exp(chi + 1j * phi)
             else:
-                phi = self.generate_phase_screen((ny, nx), d, dz)
-            E = E * np.exp(1j * phi)
+                # Phase-only (scalar turbulence): preserves polarization
+                if phase_screens is not None:
+                    phi = phase_screens[step]
+                else:
+                    phi = self.generate_phase_screen((ny, nx), d, dz)
+                E = E * np.exp(1j * phi)
 
             # Second half-step free-space propagation
             E_hat = fft2(E)
