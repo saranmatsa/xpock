@@ -373,6 +373,23 @@ class TurbulenceModel:
             11.0 / 6.0
         )
 
+    def compute_fried_parameter(self) -> float:
+        """Compute the Fried parameter r₀ in meters.
+
+        r₀ = [0.423 · k² · ∫Cₙ²(z) dz]^(-3/5)
+
+        For constant Cₙ² over the full path:
+            r₀ = [0.423 · k² · Cₙ² · L]^(-3/5)
+
+        r₀ is the coherence length of the atmosphere — the diameter over
+        which the wavefront remains approximately phase-coherent. When
+        r₀ is small compared to the receiver aperture, turbulence causes
+        significant beam distortion.
+        """
+        k = 2.0 * np.pi / self.cfg.wavelength
+        cn2_integral = self.cfg.cn2 * self.cfg.distance
+        return (0.423 * k**2 * cn2_integral) ** (-3.0 / 5.0)
+
     def propagate_with_metrics(
         self, field: np.ndarray, x: np.ndarray, y: np.ndarray
     ) -> TurbulenceResult:
