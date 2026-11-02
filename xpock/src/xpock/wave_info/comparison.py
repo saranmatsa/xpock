@@ -168,6 +168,7 @@ class WaveModulationComparator:
             distance=distance,
             n_screens=n_screens,
             verbose=verbose,
+            turb_models=turb_models,
         )
         skm_results = skm_result['skm_results']
 
