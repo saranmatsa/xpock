@@ -105,12 +105,26 @@ class BERSimulator:
         return TurbulenceModel(turb_cfg)
 
     def _fresh_screens(self, turb_model: TurbulenceModel, n_screens: int,
-                       dz: float, ny_dim: int, nx_dim: int) -> List[np.ndarray]:
-        """Generate one fresh, independent set of phase screens for a trial."""
-        return [
+                       dz: float, ny_dim: int, nx_dim: int
+                       ) -> Tuple[List[np.ndarray], Optional[List[np.ndarray]]]:
+        """Generate one fresh, independent set of phase (+ amplitude) screens.
+
+        Returns (phase_screens, amplitude_screens). When amplitude_turbulence
+        is False, amplitude_screens is None. The same screens are applied to
+        Ex and Ey to preserve polarization relationships.
+        """
+        phase_screens = [
             turb_model.generate_phase_screen((ny_dim, nx_dim), self.dx, dz)
             for _ in range(n_screens)
         ]
+        if turb_model.cfg.amplitude_turbulence:
+            amplitude_screens = [
+                turb_model.generate_amplitude_screen((ny_dim, nx_dim), self.dx, dz)
+                for _ in range(n_screens)
+            ]
+        else:
+            amplitude_screens = None
+        return phase_screens, amplitude_screens
 
     def run_skm_ber(
         self,
@@ -207,18 +221,21 @@ class BERSimulator:
                 confusion = {}
 
                 for _ in range(n_trials_per_config):
-                    # Fresh phase screens for this trial -> statistical independence.
-                    # Same screens applied to Ex and Ey to preserve polarization.
-                    phase_screens = self._fresh_screens(
+                    # Fresh phase (+ amplitude) screens for this trial ->
+                    # statistical independence. Same screens applied to Ex and
+                    # Ey to preserve polarization relationships.
+                    phase_screens, amplitude_screens = self._fresh_screens(
                         turb_model, n_screens, dz, ny_dim, nx_dim
                     )
                     E_rx = turb_model.propagate(
                         Ex_tx, self.grid_x, self.grid_y,
                         phase_screens=phase_screens,
+                        amplitude_screens=amplitude_screens,
                     )
                     E_rx_y = turb_model.propagate(
                         Ey_tx, self.grid_x, self.grid_y,
                         phase_screens=phase_screens,
+                        amplitude_screens=amplitude_screens,
                     )
 
                     # Receiver: measure skyrmion number
@@ -365,14 +382,16 @@ class BERSimulator:
                 confusion = {}
 
                 for _ in range(n_trials_per_config):
-                    # Fresh phase screens for this trial -> statistical independence
-                    phase_screens = self._fresh_screens(
+                    # Fresh phase (+ amplitude) screens for this trial ->
+                    # statistical independence.
+                    phase_screens, amplitude_screens = self._fresh_screens(
                         turb_model, n_screens, dz, ny_dim, nx_dim
                     )
                     # Propagate through turbulence
                     E_rx = turb_model.propagate(
                         E_tx, self.grid_x, self.grid_y,
                         phase_screens=phase_screens,
+                        amplitude_screens=amplitude_screens,
                     )
 
                     # Receiver: compute overlap with each OAM mode
