@@ -110,14 +110,25 @@ class TurbulenceModel:
         K = np.sqrt(KX**2 + KY**2)
 
         # Von Karman spectrum: Φₙ(κ) = 0.033·Cₙ²·κ^(-11/3)·exp(-κ²/κₘ²)
-        # Cut off at inner scale κₘ = 5.92/l₀ and outer scale κ₀ = 2π/L₀
+        # Cut off at inner scale κₘ = 5.92/l₀ and outer scale κ₀ = 2π/L₀.
+        #
+        # The phase variance accumulated through a slice of thickness dz scales
+        # linearly with dz (OPD variance ∝ Cₙ²·dz). Scaling the spectrum by dz
+        # makes each phase screen represent its slice thickness, so the TOTAL
+        # turbulence over n_screens screens is n_screens·dz = L, independent of
+        # the screen count. Without this, every screen carries full-path strength
+        # and turbulence is over-counted by a factor of n_screens.
         km = 5.92 / self.cfg.inner_scale
         k0 = 2.0 * np.pi / self.cfg.outer_scale
 
         # Avoid division by zero at K=0
         K_safe = np.where(K == 0, 1.0, K)
-        phi_n = 0.033 * self.cfg.cn2 * K_safe ** (-11.0 / 3.0) * np.exp(
-            -(K_safe / km) ** 2
+        phi_n = (
+            0.033
+            * self.cfg.cn2
+            * dz
+            * K_safe ** (-11.0 / 3.0)
+            * np.exp(-(K_safe / km) ** 2)
         )
         # Zero out modes below outer scale
         phi_n = np.where(K < k0, 0.0, phi_n)
