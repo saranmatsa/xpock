@@ -142,6 +142,19 @@ class WaveModulationComparator:
             print(f"Trials per config: {n_trials_per_config}")
             print()
 
+        # Build one turbulence model per Cn², shared across all three schemes
+        # for a fair comparison (identical turbulence statistics).
+        turb_models: Dict[float, TurbulenceModel] = {}
+        for cn2 in cn2_values:
+            turb_cfg = TurbulenceConfig(
+                wavelength=self.wavelength,
+                distance=distance,
+                cn2=cn2,
+                n_screens=n_screens,
+                seed=int(self.rng.integers(0, 2 ** 31 - 1)),
+            )
+            turb_models[cn2] = TurbulenceModel(turb_cfg)
+
         # --- SKM ---
         if verbose:
             print("-" * 70)
@@ -180,6 +193,7 @@ class WaveModulationComparator:
             n_screens=n_screens,
             waist=waist,
             verbose=verbose,
+            turb_models=turb_models,
         )
 
         # Build comparison summaries
@@ -247,15 +261,33 @@ class WaveModulationComparator:
         n_screens: int,
         waist: float,
         verbose: bool,
+        turb_models: Optional[Dict[float, TurbulenceModel]] = None,
     ) -> List:
         """
         Run intensity modulation BER simulation.
 
         Gaussian beam with different peak intensity levels encoding bits.
         Receiver measures total intensity and picks nearest level.
-        Under turbulence, scintillation causes intensity fading → errors.
+        Under turbulence, scintillation causes intensity fading -> errors.
+
+        Uses all n_screens (previously only screen 0 was used, and propagate
+        was called with the wrong keyword 'phase_screen' which crashed the
+        three-way comparison). Every trial draws an independent phase-screen
+        realization for statistical independence.
         """
         from xpock.properties import SpatialMode, SpatialModeConfig
+
+        if verbose:
+            print("=" * 70)
+            print("INTENSITY MODULATION (BASELINE)")
+            print("=" * 70)
+            print(f"Intensity levels: {intensity_levels}")
+            print(f"States: {len(intensity_levels)}, Bits/symbol: {int(np.floor(np.log2(len(intensity_levels))))}")
+            print(f"Distance: {distance} m, Wavelength: {self.wavelength*1e9:.0f} nm")
+            print(f"Beam waist: {waist} m")
+            print(f"Trials per config: {n_trials_per_config}")
+            print(f"Cn² values: {cn2_values}")
+            print()
 
         n_bits = int(np.floor(np.log2(len(intensity_levels))))
         results = []
@@ -269,27 +301,22 @@ class WaveModulationComparator:
         if norm > 0:
             gaussian = gaussian / norm
 
+        nx_dim = self.grid_x.shape[0]
+        ny_dim = self.grid_x.shape[1]
+
         total_configs = len(intensity_levels) * len(cn2_values)
         config_idx = 0
 
         for cn2 in cn2_values:
-            turb_cfg = TurbulenceConfig(
-                wavelength=self.wavelength,
-                distance=distance,
-                cn2=cn2,
-                n_screens=n_screens,
-                seed=int(self.rng.integers(0, 2**31 - 1)),
-            )
-            turb_model = TurbulenceModel(turb_cfg)
-
-            nx_dim = self.grid_x.shape[0]
-            ny_dim = self.grid_x.shape[1]
+            turb_model = turb_models[cn2] if (turb_models is not None and cn2 in turb_models) \
+                else TurbulenceModel(TurbulenceConfig(
+                    wavelength=self.wavelength,
+                    distance=distance,
+                    cn2=cn2,
+                    n_screens=n_screens,
+                    seed=int(self.rng.integers(0, 2 ** 31 - 1)),
+                ))
             dz = distance / n_screens
-            phase_screens = []
-            for _ in range(n_screens):
-                phase_screens.append(
-                    turb_model.generate_phase_screen((ny_dim, nx_dim), self.dx, dz)
-                )
 
             for level_idx, level in enumerate(intensity_levels):
                 config_idx += 1
@@ -308,9 +335,15 @@ class WaveModulationComparator:
                 confusion = {}
 
                 for _ in range(n_trials_per_config):
+                    # Fresh phase screens for this trial -> statistical independence
+                    phase_screens = [
+                        turb_model.generate_phase_screen((ny_dim, nx_dim), self.dx, dz)
+                        for _ in range(n_screens)
+                    ]
+                    # Propagate through ALL n_screens with the correct keyword
                     E_rx = turb_model.propagate(
                         E_tx, self.grid_x, self.grid_y,
-                        phase_screen=phase_screens[0],
+                        phase_screens=phase_screens,
                     )
 
                     # Receiver: measure total intensity
