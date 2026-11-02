@@ -93,6 +93,25 @@ class BERSimulator:
         self.dx = self.grid_x[0, 1] - self.grid_x[0, 0] if self.grid_x.ndim == 2 else self.grid_x[1] - self.grid_x[0]
         self.dy = self.grid_y[1, 0] - self.grid_y[0, 0] if self.grid_y.ndim == 2 else self.grid_y[1] - self.grid_y[0]
 
+    def _make_turb_model(self, cn2: float, distance: float, n_screens: int) -> TurbulenceModel:
+        """Build a turbulence model for a (Cn², distance) configuration."""
+        turb_cfg = TurbulenceConfig(
+            wavelength=self.wavelength,
+            distance=distance,
+            cn2=cn2,
+            n_screens=n_screens,
+            seed=int(self.rng.integers(0, 2 ** 31 - 1)),
+        )
+        return TurbulenceModel(turb_cfg)
+
+    def _fresh_screens(self, turb_model: TurbulenceModel, n_screens: int,
+                       dz: float, ny_dim: int, nx_dim: int) -> List[np.ndarray]:
+        """Generate one fresh, independent set of phase screens for a trial."""
+        return [
+            turb_model.generate_phase_screen((ny_dim, nx_dim), self.dx, dz)
+            for _ in range(n_screens)
+        ]
+
     def run_skm_ber(
         self,
         constellation: List[int],
@@ -101,6 +120,7 @@ class BERSimulator:
         distance: float = 100.0,
         n_screens: int = 10,
         verbose: bool = True,
+        turb_models: Optional[Dict[float, TurbulenceModel]] = None,
     ) -> List[BERResult]:
         """
         Run skyrmion number modulation BER simulation.
@@ -112,13 +132,19 @@ class BERSimulator:
         cn2_values : list of float
             Refractive index structure constants to test.
         n_trials_per_config : int
-            Trials per (N, Cn²) pair.
+            Trials per (N, Cn²) pair. Each trial uses an independent phase
+            screen realization.
         distance : float
             Propagation distance in meters.
         n_screens : int
             Number of phase screens along path.
         verbose : bool
             Print progress.
+        turb_models : dict of float -> TurbulenceModel, optional
+            Pre-built turbulence models keyed by Cn². When supplied (e.g. by
+            compare_skm_vs_oam) the SAME model is reused so SKM and OAM see
+            identical turbulence statistics. Otherwise one model per Cn² is
+            created internally.
 
         Returns
         -------
@@ -149,26 +175,13 @@ class BERSimulator:
         results = []
         total_configs = len(constellation) * len(cn2_values)
         config_idx = 0
+        nx_dim = self.grid_x.shape[0]
+        ny_dim = self.grid_x.shape[1]
 
         for cn2 in cn2_values:
-            turb_cfg = TurbulenceConfig(
-                wavelength=self.wavelength,
-                distance=distance,
-                cn2=cn2,
-                n_screens=n_screens,
-                seed=int(self.rng.integers(0, 2**31 - 1)),
-            )
-            turb_model = TurbulenceModel(turb_cfg)
-
-            # Pre-generate phase screens (same screens for all symbols at this Cn²)
-            nx_dim = self.grid_x.shape[0]
-            ny_dim = self.grid_x.shape[1]
+            turb_model = turb_models[cn2] if (turb_models is not None and cn2 in turb_models) \
+                else self._make_turb_model(cn2, distance, n_screens)
             dz = distance / n_screens
-            phase_screens = []
-            for _ in range(n_screens):
-                phase_screens.append(
-                    turb_model.generate_phase_screen((ny_dim, nx_dim), self.dx, dz)
-                )
 
             for n_tx in constellation:
                 config_idx += 1
@@ -194,8 +207,11 @@ class BERSimulator:
                 confusion = {}
 
                 for _ in range(n_trials_per_config):
-                    # Propagate both field components through turbulence
-                    # Same phase screens for Ex and Ey to preserve polarization
+                    # Fresh phase screens for this trial -> statistical independence.
+                    # Same screens applied to Ex and Ey to preserve polarization.
+                    phase_screens = self._fresh_screens(
+                        turb_model, n_screens, dz, ny_dim, nx_dim
+                    )
                     E_rx = turb_model.propagate(
                         Ex_tx, self.grid_x, self.grid_y,
                         phase_screens=phase_screens,
@@ -264,6 +280,7 @@ class BERSimulator:
         n_screens: int = 10,
         waist: float = 1.0,
         verbose: bool = True,
+        turb_models: Optional[Dict[float, TurbulenceModel]] = None,
     ) -> List[OAMResult]:
         """
         Run OAM multiplexing baseline BER simulation.
@@ -316,24 +333,13 @@ class BERSimulator:
                 mode_field = mode_field / norm
             mode_fields[l] = mode_field
 
-        for cn2 in cn2_values:
-            turb_cfg = TurbulenceConfig(
-                wavelength=self.wavelength,
-                distance=distance,
-                cn2=cn2,
-                n_screens=n_screens,
-                seed=int(self.rng.integers(0, 2**31 - 1)),
-            )
-            turb_model = TurbulenceModel(turb_cfg)
+        nx_dim = self.grid_x.shape[0]
+        ny_dim = self.grid_x.shape[1]
 
-            nx_dim = self.grid_x.shape[0]
-            ny_dim = self.grid_x.shape[1]
+        for cn2 in cn2_values:
+            turb_model = turb_models[cn2] if (turb_models is not None and cn2 in turb_models) \
+                else self._make_turb_model(cn2, distance, n_screens)
             dz = distance / n_screens
-            phase_screens = []
-            for _ in range(n_screens):
-                phase_screens.append(
-                    turb_model.generate_phase_screen((ny_dim, nx_dim), self.dx, dz)
-                )
 
             for l_tx in oam_modes:
                 config_idx += 1
@@ -359,6 +365,10 @@ class BERSimulator:
                 confusion = {}
 
                 for _ in range(n_trials_per_config):
+                    # Fresh phase screens for this trial -> statistical independence
+                    phase_screens = self._fresh_screens(
+                        turb_model, n_screens, dz, ny_dim, nx_dim
+                    )
                     # Propagate through turbulence
                     E_rx = turb_model.propagate(
                         E_tx, self.grid_x, self.grid_y,
@@ -441,6 +451,12 @@ class BERSimulator:
             print("#" * 70)
             print()
 
+        # One turbulence model per Cn², shared by both schemes for a fair
+        # comparison (identical turbulence statistics).
+        turb_models: Dict[float, TurbulenceModel] = {}
+        for cn2 in cn2_values:
+            turb_models[cn2] = self._make_turb_model(cn2, distance, n_screens)
+
         skm_results = self.run_skm_ber(
             constellation=skm_constellation,
             cn2_values=cn2_values,
@@ -448,6 +464,7 @@ class BERSimulator:
             distance=distance,
             n_screens=n_screens,
             verbose=verbose,
+            turb_models=turb_models,
         )
 
         print()
@@ -458,6 +475,7 @@ class BERSimulator:
             distance=distance,
             n_screens=n_screens,
             verbose=verbose,
+            turb_models=turb_models,
         )
 
         # Build comparison: average BER per Cn² across all states
