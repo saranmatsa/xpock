@@ -29,34 +29,46 @@ skill procedure:
 
 Each experiment entry records: hypothesis, method, raw numbers, pass/fail, and interpretation.
 
-## V2 Turbulence Model Validation — 2026-11-02 21:00:08
+## Bugs Fixed
+
+| # | Issue | Fix |
+|---|-------|-----|
+| 1 | Skyrmion field: unbounded θ, pole-dividing Jones map | Clamped θ=π·clip(r/R,0,1); pole-free map Ex=cos(θ/2), Ey=sin(θ/2)e^{iqφ} |
+| 2 | Topological charge non-quantization | Solid-angle plaquette method (exact integer Q) |
+| 3 | Turbulence n_screens over-counting | Spectrum scaled by dz; renormalized to spectrum-integral variance |
+| 4 | Missing amplitude turbulence (scintillation) | Added log-amplitude screens: E=E·exp(χ+i·φ), Var(χ)=0.189·Var(OPD) |
+| 5 | Trial non-independence | Fresh phase screens per trial via _fresh_screens() |
+| 6 | Unfair BER comparison | Shared turbulence model per Cn² across SKM/OAM/Intensity |
+| 7 | Receiver idealization | Opt-in Gaussian + Poisson shot noise models |
+| 8 | Analysis DOP averaged Stokes first | Pointwise DOP then average |
+| 9 | ber_simulation.py: amplitude screens not shared between Ex/Ey | _fresh_screens returns both phase+amplitude; both passed to propagate |
+
+## V2 Turbulence Model Validation — 2026-11-02 21:13:03
 
 | Check | Passed | Measured | Expected | Rel Error | Notes |
 |-------|--------|----------|----------|-----------|-------|
-| phase_screen_variance_matches_spectrum | ✓ | 168.867 | 168.867 | 0 | empirical=168.866775, theory=168.866775, rel_err=0.0000 |
-| turbulence_independent_of_n_screens | ✓ | 0.0428987 | 0 | 0.0237767 | phase_stds=['1.8021', '1.7828', '1.8257', '1.8164', '1.7942'], spread=0.0429 |
-| power_conservation_split_step | ✓ | 6.31878e-15 | 0 | 6.31878e-15 | max relative power error=0.000000 |
+| phase_screen_variance_matches_spectrum | ✓ | 168.867 | 168.867 | 0 | empirical=168.866775, theory=168.866775 |
+| turbulence_independent_of_n_screens | ✓ | 0.0342986 | 0 | 0.01894 | spread=0.034 rad across n_screens=1,5,10,20 |
+| power_conservation_phase_only | ✓ | 6.31878e-15 | 0 | 6.32e-15 | unitary propagation conserves power |
+| power_mean_preserved_with_scintillation | ✓ | 9.18284e-07 | 0 | 9.18e-07 | mean power preserved over 10 trials |
 
-**Summary: 3/3 checks passed**
+**Summary: 4/4 checks passed**
 
-## V1 Skyrmion Quantization — 2026-11-02 21:00:08
+## V1 Skyrmion Quantization — 2026-11-02 21:13:03
 
 | Check | Passed | Measured | Expected | Rel Error | Notes |
 |-------|--------|----------|----------|-----------|-------|
-| skyrmion_Q_q=-4 | ✓ | -4 | -4 | 2.22045e-16 | Q=-4.000000, round(Q)=-4 |
-| skyrmion_Q_q=-3 | ✓ | -3 | -3 | 0 | Q=-3.000000, round(Q)=-3 |
-| skyrmion_Q_q=-2 | ✓ | -2 | -2 | 2.22045e-16 | Q=-2.000000, round(Q)=-2 |
-| skyrmion_Q_q=-1 | ✓ | -1 | -1 | 0 | Q=-1.000000, round(Q)=-1 |
-| skyrmion_Q_q=1 | ✓ | 1 | 1 | 0 | Q=1.000000, round(Q)=1 |
-| skyrmion_Q_q=2 | ✓ | 2 | 2 | 2.22045e-16 | Q=2.000000, round(Q)=2 |
-| skyrmion_Q_q=3 | ✓ | 3 | 3 | 0 | Q=3.000000, round(Q)=3 |
-| skyrmion_Q_q=4 | ✓ | 4 | 4 | 2.22045e-16 | Q=4.000000, round(Q)=4 |
-| skyrmion_quantization_all_charges | ✓ | 1 | 1 | 0 | All charges [-4, -3, -2, -1, 1, 2, 3, 4] quantized exactly |
-| skyrmion_grid_conv_n=32 | ✓ | 2 | 2 | 4.44089e-16 | Q=2.000000 at n=32 |
-| skyrmion_grid_conv_n=64 | ✓ | 2 | 2 | 4.44089e-16 | Q=2.000000 at n=64 |
-| skyrmion_grid_conv_n=128 | ✓ | 2 | 2 | 4.44089e-16 | Q=2.000000 at n=128 |
-| skyrmion_grid_conv_n=256 | ✓ | 2 | 2 | 4.44089e-16 | Q=2.000000 at n=256 |
-| skyrmion_grid_convergence | ✓ | 1 | 1 | 0 | Q=2 exact at n=32,64,128,256 |
+| skyrmion_Q_q=-4 | ✓ | -4 | -4 | 2.22e-16 | Q=-4.000000, round(Q)=-4 |
+| skyrmion_Q_q=-3 | ✓ | -3 | -3 | 0 | Q=-3.000000 |
+| skyrmion_Q_q=-2 | ✓ | -2 | -2 | 2.22e-16 | Q=-2.000000 |
+| skyrmion_Q_q=-1 | ✓ | -1 | -1 | 0 | Q=-1.000000 |
+| skyrmion_Q_q=1 | ✓ | 1 | 1 | 0 | Q=1.000000 |
+| skyrmion_Q_q=2 | ✓ | 2 | 2 | 2.22e-16 | Q=2.000000 |
+| skyrmion_Q_q=3 | ✓ | 3 | 3 | 0 | Q=3.000000 |
+| skyrmion_Q_q=4 | ✓ | 4 | 4 | 2.22e-16 | Q=4.000000 |
+| skyrmion_quantization_all_charges | ✓ | 1 | 1 | 0 | All 8 charges quantized exactly |
+| skyrmion_grid_conv_n=32/64/128/256 | ✓ | 2 | 2 | ≤4.44e-16 | Q=2 exact at all resolutions |
+| skyrmion_grid_convergence | ✓ | 1 | 1 | 0 | Q=2 at n=32,64,128,256 |
 
 **Summary: 14/14 checks passed**
 
@@ -137,4 +149,4 @@ Cn²=1e-13, 100 m link, 3 bits/symbol, 100 trials
 
 - 90/90 fast tests pass (test_core, test_wave_info, test_hx241_integration)
 - Adversarial test suite: category-filtered tests pass when they run; full suite times out (>300s) due to 10000+ parametrized cases
-- No regressions from amplitude turbulence addition
+- No regressions from amplitude turbulence addition or ber_simulation.py polarization fix
