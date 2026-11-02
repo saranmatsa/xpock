@@ -430,34 +430,38 @@ class PolarizationTexture:
     def _skyrmion(self, x, y):
         """Skyrmion polarization texture: Stokes vector wraps the Bloch sphere.
 
-        Uses the standard construction:
+        The normalized Stokes vector is
         n = (sin(theta(r)) cos(q*phi), sin(theta(r)) sin(q*phi), cos(theta(r)))
-        theta(r) = pi * r / R (goes from 0 at center to pi at edge)
-        Jones vector from n via Hopf-like mapping.
+
+        Construction notes:
+        - theta(r) = pi * r / R for r < R and theta = pi for r >= R, so the texture
+          is confined to the skyrmion radius and satisfies the proper boundary
+          condition n -> constant (uniform vertical polarization) beyond R. Without
+          this clamping, theta keeps growing past pi across the whole grid, the
+          polarization wraps multiple times, and the computed skyrmion number is
+          neither integer nor equal to the imposed charge.
+        - The Jones vector is the pole-free representation
+          Ex = cos(theta/2), Ey = sin(theta/2) exp(i q phi), which yields exactly
+          S1 = cos(theta), S2 = sin(theta) cos(q phi), S3 = sin(theta) sin(q phi)
+          with |Ex|^2 + |Ey|^2 = 1 everywhere. The previous Stokes->Jones mapping
+          divided by Ex and was singular at the Bloch-sphere poles (Ex = 0),
+          producing a zero field at r = R and a corrupted skyrmion number.
         """
         R = self.cfg.skyrmion_radius
         q = self.cfg.skyrmion_charge
         r = np.sqrt(x ** 2 + y ** 2)
         phi = np.arctan2(y, x)
-        theta = np.pi * r / R  # 0 at center, pi at r=R
 
-        # Stokes parameters (normalized)
-        n_x = np.sin(theta) * np.cos(q * phi)
-        n_y = np.sin(theta) * np.sin(q * phi)
-        n_z = np.cos(theta)
+        # Confine the texture to the skyrmion radius: 0 at center, pi at edge,
+        # constant pi beyond R (uniform boundary polarization).
+        theta = np.pi * np.clip(r / R, 0.0, 1.0)
+        half = theta / 2.0
 
-        # Map Stokes to Jones: |H> = (1,0), |V> = (0,1)
-        # S0=1, S1=|Ex|^2-|Ey|^2, S2=2 Re(Ex* Ey), S3=2 Im(Ex* Ey)
-        # We choose Ex real positive, Ey complex:
-        # Ex = sqrt((1 + n_z)/2)  (real)
-        # Ey = (n_x + i n_y) / (2 * Ex)  -> gives S2, S3
-        Ex = np.sqrt(np.clip((1.0 + n_z) / 2.0, 0.0, 1.0)).astype(np.complex128)
-        # Avoid division by zero at poles
-        Ey = np.where(
-            np.abs(Ex) > 1e-12,
-            (n_x + 1j * n_y) / (2.0 * Ex + 1e-15),
-            0.0 + 0.0j,
-        ).astype(np.complex128)
+        # Pole-free Jones representation of the normalized Stokes vector:
+        #   S1 = cos(theta), S2 = sin(theta) cos(q phi), S3 = sin(theta) sin(q phi)
+        #   |Ex|^2 + |Ey|^2 = 1 everywhere (no pole at Ex = 0).
+        Ex = np.cos(half).astype(np.complex128)
+        Ey = (np.sin(half) * np.exp(1j * q * phi)).astype(np.complex128)
         return Ex, Ey
 
     def _custom_jones(self, x, y):
