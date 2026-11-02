@@ -20,7 +20,7 @@ All arrays use (ny, nx) shape convention matching XPOCK WaveField.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 import numpy as np
 from scipy.fft import fft2, ifft2, fftfreq
 
@@ -110,14 +110,25 @@ class TurbulenceModel:
         K = np.sqrt(KX**2 + KY**2)
 
         # Von Karman spectrum: Φₙ(κ) = 0.033·Cₙ²·κ^(-11/3)·exp(-κ²/κₘ²)
-        # Cut off at inner scale κₘ = 5.92/l₀ and outer scale κ₀ = 2π/L₀
+        # Cut off at inner scale κₘ = 5.92/l₀ and outer scale κ₀ = 2π/L₀.
+        #
+        # The phase variance accumulated through a slice of thickness dz scales
+        # linearly with dz (OPD variance ∝ Cₙ²·dz). Scaling the spectrum by dz
+        # makes each phase screen represent its slice thickness, so the TOTAL
+        # turbulence over n_screens screens is n_screens·dz = L, independent of
+        # the screen count. Without this, every screen carries full-path strength
+        # and turbulence is over-counted by a factor of n_screens.
         km = 5.92 / self.cfg.inner_scale
         k0 = 2.0 * np.pi / self.cfg.outer_scale
 
         # Avoid division by zero at K=0
         K_safe = np.where(K == 0, 1.0, K)
-        phi_n = 0.033 * self.cfg.cn2 * K_safe ** (-11.0 / 3.0) * np.exp(
-            -(K_safe / km) ** 2
+        phi_n = (
+            0.033
+            * self.cfg.cn2
+            * dz
+            * K_safe ** (-11.0 / 3.0)
+            * np.exp(-(K_safe / km) ** 2)
         )
         # Zero out modes below outer scale
         phi_n = np.where(K < k0, 0.0, phi_n)
@@ -134,17 +145,32 @@ class TurbulenceModel:
         )
         phase_screen_ft = phase_random * np.sqrt(phi_n * dk_area)
 
-        # Inverse FFT to get phase screen in radians (OPD in meters)
+        # Inverse FFT to get OPD screen in meters
         opd_screen = np.real(ifft2(phase_screen_ft))
 
         # Convert OPD (meters) to phase (radians): phi = 2π·OPD/λ
         phase_screen = 2.0 * np.pi * opd_screen / self.cfg.wavelength
 
+        # --- Normalize phase screen to theoretical von Karman variance ---
+        # The ifft2 divides by N², drastically reducing amplitude.
+        # Theoretical phase variance: σ_φ² = (2π/λ)² · ∫ Φₙ(κ) d²κ
+        # Discrete: ∫ Φₙ d²κ ≈ Σ Φₙ[k] · Δκx · Δκy = Σ phi_n · dk_area
+        k_area_integral = float(np.sum(phi_n) * dk_area)
+        if k_area_integral > 0:
+            sigma_phi_theoretical = (
+                2.0 * np.pi / self.cfg.wavelength
+            ) * np.sqrt(k_area_integral)
+            sigma_phi_raw = float(np.std(phase_screen))
+            if sigma_phi_raw > 1e-15:
+                phase_screen = phase_screen * (
+                    sigma_phi_theoretical / sigma_phi_raw
+                )
+
         return phase_screen
 
     def propagate(
         self, field: np.ndarray, x: np.ndarray, y: np.ndarray,
-        phase_screen: Optional[np.ndarray] = None,
+        phase_screens: Optional[List[np.ndarray]] = None,
     ) -> np.ndarray:
         """Propagate complex field through turbulent atmosphere.
 
@@ -160,6 +186,11 @@ class TurbulenceModel:
             x coordinates.
         y : (ny,) or (ny, nx)
             y coordinates.
+        phase_screens : list of (ny, nx) arrays, optional
+            Pre-generated phase screens, one per propagation step.
+            If None, a new random screen is generated for each step.
+            The same screen list must be used for Ex and Ey to preserve
+            polarization relationships.
 
         Returns
         -------
@@ -193,15 +224,15 @@ class TurbulenceModel:
         H = np.exp(-1j * K2 * dz / (2.0 * k))
 
         E = field.copy()
-        for _ in range(self.cfg.n_screens):
+        for step in range(self.cfg.n_screens):
             # Half-step free-space propagation
             E_hat = fft2(E)
             E_hat = E_hat * H
             E = ifft2(E_hat)
 
             # Apply phase screen
-            if phase_screen is not None:
-                phi = phase_screen
+            if phase_screens is not None:
+                phi = phase_screens[step]
             else:
                 phi = self.generate_phase_screen((ny, nx), d, dz)
             E = E * np.exp(1j * phi)

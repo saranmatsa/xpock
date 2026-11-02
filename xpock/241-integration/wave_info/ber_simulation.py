@@ -207,9 +207,9 @@ class BERSimulator:
         confusion = {}  # "tx_N->rx_N": count
 
         for trial in range(n_trials):
-            # Generate phase screens once and apply the SAME screens to both
-            # field components. This preserves polarization relationships
-            # (the relative phase between Ex and Ey is unchanged).
+            # Generate FRESH phase screens for each trial -> statistical
+            # independence. Same screens applied to both Ex and Ey to
+            # preserve polarization relationships.
             phi_list = []
             for _ in range(turbulence_model.cfg.n_screens):
                 phi_list.append(
@@ -220,11 +220,11 @@ class BERSimulator:
 
             E_rx = turbulence_model.propagate(
                 Ex_tx, self.grid_x, self.grid_y,
-                phase_screen=phi_list[0],
+                phase_screens=phi_list,
             )
             E_rx_y = turbulence_model.propagate(
                 Ey_tx, self.grid_x, self.grid_y,
-                phase_screen=phi_list[0]
+                phase_screens=phi_list,
             )
 
             # Measure skyrmion number at receiver
@@ -293,8 +293,9 @@ class BERSimulator:
                 turbulence_model = TurbulenceModel(turbulence_cfg)
 
                 for trial in range(n_trials_per_config):
-                    # Generate phase screens once and apply same screens to both
-                    # field components to preserve polarization relationships.
+                    # Generate FRESH phase screens for each trial -> statistical
+                    # independence. Same screens applied to both Ex and Ey to
+                    # preserve polarization relationships.
                     phi_list = []
                     nx_dim = self.grid_x.shape[0] if self.grid_x.ndim == 2 else len(self.grid_x)
                     ny_dim = self.grid_x.shape[1] if self.grid_x.ndim == 2 else len(self.grid_x)
@@ -309,11 +310,11 @@ class BERSimulator:
 
                     E_rx = turbulence_model.propagate(
                         Ex_tx, self.grid_x, self.grid_y,
-                        phase_screen=phi_list[0],
+                        phase_screens=phi_list,
                     )
                     E_rx_y = turbulence_model.propagate(
                         Ey_tx, self.grid_x, self.grid_y,
-                        phase_screen=phi_list[0]
+                        phase_screens=phi_list,
                     )
 
                     q_measured, n_rx = modem.demodulate(E_rx, E_rx_y)

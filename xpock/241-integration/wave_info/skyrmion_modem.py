@@ -66,6 +66,12 @@ class ModemConfig:
     grid_y: Optional[np.ndarray] = None
     skyrmion_radius: float = 1.0
     constellation: List[int] = field(default_factory=lambda: [-2, -1, 0, 1, 2])
+    receiver_noise_std: float = 0.0
+        # Standard deviation of additive complex Gaussian detector noise,
+        # relative to the RMS field amplitude. 0.0 = ideal noiseless receiver.
+        # >0 models photon/read noise in the Stokes measurement, which makes
+        # the recovered skyrmion number (and hence BER) stochastic and
+        # receiver-realistic. Opt-in; existing behaviour is unchanged at 0.
 
 
 @dataclass

@@ -321,30 +321,53 @@ class WaveAnalyzer:
                 if P > 0:
                     props.oam_per_photon = float(Lz / P)  # in units of hbar (approx)
 
+        # Skyrmion number from the polarization texture (Ex, Ey).
+        # Uses the gauge-invariant solid-angle plaquette method in properties.py.
+        if field.Ex is not None and field.Ey is not None:
+            psi_ex = field.Ex
+            psi_ey = field.Ey
+            # Extract a 2D spatial slice (middle z, middle t)
+            if psi_ex.ndim == 4:  # (z, y, x, t)
+                psi_ex = psi_ex[psi_ex.shape[0] // 2, :, :, psi_ex.shape[3] // 2]
+                psi_ey = psi_ey[psi_ey.shape[0] // 2, :, :, psi_ey.shape[3] // 2]
+            elif psi_ex.ndim == 3:  # (y, x, t)
+                psi_ex = psi_ex[:, :, psi_ex.shape[2] // 2]
+                psi_ey = psi_ey[:, :, psi_ey.shape[2] // 2]
+            if psi_ex.ndim == 2:
+                tc = TopologicalCharge(
+                    TopologicalChargeConfig(charge_type="skyrmion", charge=1)
+                )
+                try:
+                    Q = tc.compute_skyrmion_number(psi_ex, psi_ey)
+                    props.skyrmion_number = float(Q)
+                except Exception:
+                    props.validity_notes.append("skyrmion_number: computation failed")
+
     def _polarization_analysis(self, field: WaveField, props: MeasurableProperties) -> None:
         Ex = field.Ex
         Ey = field.Ey
         if Ex is None or Ey is None:
             return
 
-        # Stokes parameters (spatially/temporally averaged)
+        # Stokes parameters
         S0 = np.abs(Ex) ** 2 + np.abs(Ey) ** 2
         S1 = np.abs(Ex) ** 2 - np.abs(Ey) ** 2
         S2 = 2.0 * np.real(Ex * np.conj(Ey))
         S3 = 2.0 * np.imag(Ex * np.conj(Ey))
 
-        # Average over all dimensions
+        # Average Stokes over all dimensions (for reporting)
         props.stokes_s0 = float(np.mean(S0))
         props.stokes_s1 = float(np.mean(S1))
         props.stokes_s2 = float(np.mean(S2))
         props.stokes_s3 = float(np.mean(S3))
 
-        S0_avg = np.mean(S0)
-        if S0_avg > 0:
-            dop = np.sqrt(props.stokes_s1 ** 2 + props.stokes_s2 ** 2 + props.stokes_s3 ** 2) / S0_avg
-            props.degree_of_polarization = float(np.clip(dop, 0.0, 1.0))
-        else:
-            props.degree_of_polarization = 0.0
+        # Degree of polarization: compute pointwise, then average.
+        # Averaging Stokes first then computing DOP is wrong for spatially-
+        # varying polarization (e.g. skyrmion textures): mean S1,S2,S3 cancel
+        # by symmetry even though every point is fully polarized.
+        S0_safe = np.where(S0 == 0, 1e-15, S0)
+        dop_pointwise = np.sqrt(S1 ** 2 + S2 ** 2 + S3 ** 2) / S0_safe
+        props.degree_of_polarization = float(np.clip(np.mean(dop_pointwise), 0.0, 1.0))
 
     def _estimate_schmidt_number(self, field: WaveField) -> Optional[float]:
         """Approximate Schmidt number for space-time nonseparability.
