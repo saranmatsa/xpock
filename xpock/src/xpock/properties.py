@@ -572,15 +572,27 @@ class TopologicalCharge:
         n_norm = np.where(n_norm == 0, 1.0, n_norm)
         n = n / n_norm
 
-        # Gradients
-        dx_n = np.gradient(n, axis=1)  # d/dx
-        dy_n = np.gradient(n, axis=2)  # d/dy
+        # Skyrmion number via the gauge-invariant lattice solid-angle
+        # (plaquette) method. For each elementary plaquette the solid angle
+        # subtended by the four n-vectors is summed; Q = (1/4pi) * sum Omega.
+        # This is far more accurate than a finite-difference gradient product
+        # (which under-resolves high topological charge and is sensitive to
+        # branch cuts), and it returns an exactly integer charge for a
+        # lattice skyrmion. Vectorized over all plaquettes.
+        n00 = n[:, :-1, :-1]
+        n01 = n[:, :-1, 1:]
+        n11 = n[:, 1:, 1:]
+        n10 = n[:, 1:, :-1]
 
-        # Cross product ∂x n × ∂y n
-        cross = np.cross(dx_n, dy_n, axis=0)
-        # n · cross
-        integrand = np.sum(n * cross, axis=0)
-        Q = np.sum(integrand) / (4.0 * np.pi)
+        def _solid_angle(a, b, c):
+            num = np.sum(a * np.cross(b, c, axis=0), axis=0)
+            den = 1.0 + np.sum(a * b, axis=0) + np.sum(b * c, axis=0) + np.sum(c * a, axis=0)
+            return 2.0 * np.arctan2(num, den)
+
+        # Triangle (n00, n01, n11) + triangle (n00, n11, n10). The vertex
+        # ordering below yields Q = +q for a skyrmion of charge q.
+        omega = _solid_angle(n00, n11, n01) + _solid_angle(n00, n10, n11)
+        Q = np.sum(omega) / (4.0 * np.pi)
         return float(Q)
 
 
