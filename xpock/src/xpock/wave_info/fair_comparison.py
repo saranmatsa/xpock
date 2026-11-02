@@ -199,24 +199,53 @@ def validate_turbulence_model(wavelength: float = 1.55e-6,
     ))
 
     # --- Check 3: Power conservation ---
+    # Without amplitude turbulence (phase-only), split-step propagation is
+    # unitary and conserves total power exactly. With amplitude turbulence
+    # (scintillation), power fluctuates — the mean power over trials is
+    # preserved but individual realizations vary.
     power_in = total_power(E_in, dx, dx)
-    power_errors = []
+    power_errors_phase_only = []
+    power_mean_errors = []
     for n_screens in [1, 5, 10, 20]:
+        # Phase-only: exact power conservation
         cfg_s = TurbulenceConfig(wavelength=wavelength, distance=distance,
-                                 cn2=cn2, n_screens=n_screens, seed=7)
+                                 cn2=cn2, n_screens=n_screens,
+                                 seed=7, amplitude_turbulence=False)
         m = TurbulenceModel(cfg_s)
         E_out = m.propagate(E_in, X, Y)
         power_out = total_power(E_out, dx, dx)
-        power_errors.append(abs(power_out - power_in) / power_in)
+        power_errors_phase_only.append(abs(power_out - power_in) / power_in)
 
-    max_power_err = max(power_errors)
+        # With amplitude turbulence: mean power preserved (not pointwise)
+        cfg_a = TurbulenceConfig(wavelength=wavelength, distance=distance,
+                                 cn2=cn2, n_screens=n_screens,
+                                 seed=7, amplitude_turbulence=True)
+        m_a = TurbulenceModel(cfg_a)
+        powers = []
+        for _ in range(10):
+            E_out_a = m_a.propagate(E_in, X, Y)
+            powers.append(total_power(E_out_a, dx, dx))
+        power_mean_errors.append(abs(np.mean(powers) - power_in) / power_in)
+
+    max_power_err_phase = max(power_errors_phase_only)
+    max_power_err_mean = max(power_mean_errors)
+
     results.append(ValidationResult(
-        name="power_conservation_split_step",
-        passed=max_power_err < 1e-2,
-        measured=max_power_err,
+        name="power_conservation_phase_only",
+        passed=max_power_err_phase < 1e-2,
+        measured=max_power_err_phase,
         expected=0.0,
-        rel_error=max_power_err,
-        detail=f"max relative power error={max_power_err:.6f}",
+        rel_error=max_power_err_phase,
+        detail=f"phase-only max relative power error={max_power_err_phase:.6g}",
+    ))
+
+    results.append(ValidationResult(
+        name="power_mean_preserved_with_scintillation",
+        passed=max_power_err_mean < 0.2,
+        measured=max_power_err_mean,
+        expected=0.0,
+        rel_error=max_power_err_mean,
+        detail=f"scintillation max mean power error={max_power_err_mean:.6g}",
     ))
 
     return results
@@ -340,13 +369,29 @@ class FairComparison:
         return TurbulenceModel(turb_cfg)
 
     def _fresh_screens(self, turb_model: TurbulenceModel, n_screens: int,
-                       dz: float) -> List[np.ndarray]:
+                       dz: float) -> Tuple[List[np.ndarray],
+                                           Optional[List[np.ndarray]]]:
+        """Generate one fresh, independent set of phase (+ amplitude) screens.
+
+        Returns (phase_screens, amplitude_screens). When amplitude_turbulence
+        is False, amplitude_screens is None. The same screens are applied to
+        Ex and Ey so polarization relationships are preserved (scalar
+        turbulence affects both components identically).
+        """
         ny_dim = self.grid_x.shape[0]
         nx_dim = self.grid_x.shape[1]
-        return [
+        phase_screens = [
             turb_model.generate_phase_screen((ny_dim, nx_dim), self.dx, dz)
             for _ in range(n_screens)
         ]
+        if turb_model.cfg.amplitude_turbulence:
+            amplitude_screens = [
+                turb_model.generate_amplitude_screen((ny_dim, nx_dim), self.dx, dz)
+                for _ in range(n_screens)
+            ]
+        else:
+            amplitude_screens = None
+        return phase_screens, amplitude_screens
 
     # --- SKM ---
 
@@ -381,12 +426,18 @@ class FairComparison:
             Ex_tx = normalize_power(Ex_tx, self.dx, self.dy, 1.0)
             Ey_tx = normalize_power(Ey_tx, self.dx, self.dy, 1.0)
 
-            phase_screens = self._fresh_screens(turb_model, n_screens, dz)
+            phase_screens, amplitude_screens = self._fresh_screens(
+                turb_model, n_screens, dz
+            )
             E_rx = turb_model.propagate(
-                Ex_tx, self.X, self.Y, phase_screens=phase_screens,
+                Ex_tx, self.X, self.Y,
+                phase_screens=phase_screens,
+                amplitude_screens=amplitude_screens,
             )
             E_rx_y = turb_model.propagate(
-                Ey_tx, self.X, self.Y, phase_screens=phase_screens,
+                Ey_tx, self.X, self.Y,
+                phase_screens=phase_screens,
+                amplitude_screens=amplitude_screens,
             )
 
             # Receiver noise
@@ -455,9 +506,13 @@ class FairComparison:
             )
             E_tx = mode_fields[l_tx].copy()
 
-            phase_screens = self._fresh_screens(turb_model, n_screens, dz)
+            phase_screens, amplitude_screens = self._fresh_screens(
+                turb_model, n_screens, dz
+            )
             E_rx = turb_model.propagate(
-                E_tx, self.X, self.Y, phase_screens=phase_screens,
+                E_tx, self.X, self.Y,
+                phase_screens=phase_screens,
+                amplitude_screens=amplitude_screens,
             )
             # OAM is scalar polarization — add noise to the single component
             E_rx, _ = add_receiver_noise(
@@ -521,9 +576,13 @@ class FairComparison:
             )
             E_tx = level * gaussian
 
-            phase_screens = self._fresh_screens(turb_model, n_screens, dz)
+            phase_screens, amplitude_screens = self._fresh_screens(
+                turb_model, n_screens, dz
+            )
             E_rx = turb_model.propagate(
-                E_tx, self.X, self.Y, phase_screens=phase_screens,
+                E_tx, self.X, self.Y,
+                phase_screens=phase_screens,
+                amplitude_screens=amplitude_screens,
             )
             E_rx, _ = add_receiver_noise(
                 E_rx, np.zeros_like(E_rx), self.receiver_noise_std, self.rng
