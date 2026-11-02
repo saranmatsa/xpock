@@ -438,6 +438,7 @@ class BERSimulator:
         distance: float = 100.0,
         n_screens: int = 10,
         verbose: bool = True,
+        turb_models: Optional[Dict[float, TurbulenceModel]] = None,
     ) -> Dict[str, Any]:
         """
         Run both SKM and OAM simulations and return comparison.
@@ -452,10 +453,13 @@ class BERSimulator:
             print()
 
         # One turbulence model per Cn², shared by both schemes for a fair
-        # comparison (identical turbulence statistics).
-        turb_models: Dict[float, TurbulenceModel] = {}
-        for cn2 in cn2_values:
-            turb_models[cn2] = self._make_turb_model(cn2, distance, n_screens)
+        # comparison (identical turbulence statistics). If the caller supplied
+        # turb_models (e.g. from compare_all) those are reused so SKM, OAM and
+        # intensity all see identical turbulence realizations.
+        if turb_models is None:
+            turb_models: Dict[float, TurbulenceModel] = {}
+            for cn2 in cn2_values:
+                turb_models[cn2] = self._make_turb_model(cn2, distance, n_screens)
 
         skm_results = self.run_skm_ber(
             constellation=skm_constellation,
