@@ -66,6 +66,12 @@ class ModemConfig:
     grid_y: Optional[np.ndarray] = None
     skyrmion_radius: float = 1.0
     constellation: List[int] = field(default_factory=lambda: [-2, -1, 0, 1, 2])
+    receiver_noise_std: float = 0.0
+        # Standard deviation of additive complex Gaussian detector noise,
+        # relative to the RMS field amplitude. 0.0 = ideal noiseless receiver.
+        # >0 models photon/read noise in the Stokes measurement, which makes
+        # the recovered skyrmion number (and hence BER) stochastic and
+        # receiver-realistic. Opt-in; existing behaviour is unchanged at 0.
 
 
 @dataclass
@@ -232,6 +238,18 @@ class SkyrmionModem:
         n_rx : int
             Hard-decided skyrmion number (nearest constellation value).
         """
+        # Receiver realism: additive complex Gaussian detector noise (photon/
+        # read noise) on the measured Stokes field. Opt-in via
+        # ModemConfig.receiver_noise_std (relative to RMS field amplitude);
+        # 0.0 reproduces the ideal noiseless polarimeter.
+        if self.cfg.receiver_noise_std > 0.0:
+            rms = float(np.sqrt(np.mean(np.abs(Ex) ** 2 + np.abs(Ey) ** 2)))
+            if rms > 0.0:
+                rng = np.random.default_rng()
+                sigma = self.cfg.receiver_noise_std * rms / np.sqrt(2.0)
+                Ex = Ex + sigma * (rng.standard_normal(Ex.shape) + 1j * rng.standard_normal(Ex.shape))
+                Ey = Ey + sigma * (rng.standard_normal(Ey.shape) + 1j * rng.standard_normal(Ey.shape))
+
         tc = TopologicalCharge(TopologicalChargeConfig(
             charge_type="skyrmion",
             charge=1,
