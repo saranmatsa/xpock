@@ -313,8 +313,12 @@ class WaveAnalyzer:
             elif psi_2d.ndim == 3:  # (y, x, t)
                 psi_2d = psi_2d[:, :, psi_2d.shape[2] // 2]
             if psi_2d.ndim == 2:
-                dpsi_dx = np.gradient(psi_2d, axis=1)
-                dpsi_dy = np.gradient(psi_2d, axis=0)
+                dx = x[1] - x[0] if len(x) > 1 else 1.0
+                dy = y[1] - y[0] if len(y) > 1 else 1.0
+                # Gradient spacing must be the physical sampling interval (m),
+                # not one pixel — otherwise OAM comes out scaled by dx.
+                dpsi_dx = np.gradient(psi_2d, dx, axis=1)
+                dpsi_dy = np.gradient(psi_2d, dy, axis=0)
                 Lz_density = -1j * (X * dpsi_dy - Y * dpsi_dx) * np.conj(psi_2d)
                 Lz = np.sum(np.real(Lz_density))
                 P = np.sum(np.abs(psi_2d) ** 2)
