@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        submodules: true
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
+    - name: Install XPOCK (editable, with dev deps)
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e .[dev]
+
+    - name: Import smoke test
+      run: |
+        python -c "import xpock; print('xpock', xpock.__version__)"
+
+    - name: CLI smoke test
+      run: |
+        xpock --help | Select-String "xpock"
+        xpock config --output $env:TEMP/config_smoke.yaml
+        if (!(Test-Path $env:TEMP/config_smoke.yaml)) { exit 1 }
+
+    - name: Run test suite
+      run: |
+        pip install pytest
+        pytest
+
+    - name: Build wheel and sdist
+      run: |
+        pip install build
+        python -m build --wheel --sdist .
