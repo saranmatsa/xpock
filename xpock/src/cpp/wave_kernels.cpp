@@ -11,6 +11,7 @@
 
 #include <numeric>
 #include <algorithm>
+#include <array>
 
 namespace xpock {
 
@@ -439,11 +440,11 @@ Real total_power(const CArray& field, Real dx, Real dy, Real dt) {
 }
 
 // ---------------------------------------------------------------------
-// Skyrmion polarization texture
+// Skyrmion polarization texture (canonical: matches Python core)
 // ---------------------------------------------------------------------
 
 void skyrmion_field(const RArray& x, const RArray& y,
-                    int l1, int l2, Real w,
+                    int q, Real w,
                     CArray& Ex, CArray& Ey) {
     size_t Nx = x.size();
     size_t Ny = y.size();
@@ -454,6 +455,10 @@ void skyrmion_field(const RArray& x, const RArray& y,
     Real xc = 0.5 * (x.front() + x.back());
     Real yc = 0.5 * (y.front() + y.back());
 
+    // Clamp theta to [0, pi]: texture confined to radius w, uniform
+    // boundary polarization beyond w. Without this clamp theta grows
+    // without bound across the grid and the computed skyrmion number is
+    // neither integer nor equal to the imposed charge.
     for (size_t j = 0; j < Ny; ++j) {
         for (size_t i = 0; i < Nx; ++i) {
             size_t idx = j * Nx + i;
@@ -462,23 +467,32 @@ void skyrmion_field(const RArray& x, const RArray& y,
             Real r = std::sqrt(X * X + Y * Y);
             Real phi = std::atan2(Y, X);
 
-            // Gaussian envelope for the skyrmion texture
-            Real env = std::exp(-(r / w) * (r / w));
+            Real theta = M_PI * std::clamp(r / w, 0.0, 1.0);
+            Real half = theta / 2.0;
+            Real sh = std::sin(half);
 
-            // Ex: LG mode with charge l1, Ey: LG mode with charge l2
-            // Radial part: (r/w)^|l| * exp(-r^2/w^2)
-            Real radial1 = std::pow(r / w, std::abs(l1)) * env;
-            Real radial2 = std::pow(r / w, std::abs(l2)) * env;
-
-            Complex phase1 = std::exp(Complex(0.0, l1 * phi));
-            Complex phase2 = std::exp(Complex(0.0, l2 * phi));
-
-            Ex[idx] = Complex(radial1 * std::real(phase1),
-                              radial1 * std::imag(phase1));
-            Ey[idx] = Complex(radial2 * std::real(phase2),
-                              radial2 * std::imag(phase2));
+            // Pole-free Jones vector: |Ex|^2 + |Ey|^2 == 1 everywhere,
+            // no division by Ex at the Bloch-sphere poles.
+            Ex[idx] = Complex(std::cos(half), 0.0);
+            Ey[idx] = Complex(sh * std::cos(q * phi),
+                              sh * std::sin(q * phi));
         }
     }
+}
+
+// Solid angle of the triangle (a, b, c) of unit vectors on the sphere:
+//   Omega = 2 * atan2( a . (b x c), 1 + a.b + b.c + c.a )
+static Real solid_angle_triangle(const std::array<Real, 3>& a,
+                                 const std::array<Real, 3>& b,
+                                 const std::array<Real, 3>& c) {
+    Real num = a[0] * (b[1] * c[2] - b[2] * c[1])
+             + a[1] * (b[2] * c[0] - b[0] * c[2])
+             + a[2] * (b[0] * c[1] - b[1] * c[0]);
+    Real den = 1.0
+             + a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+             + b[0] * c[0] + b[1] * c[1] + b[2] * c[2]
+             + c[0] * a[0] + c[1] * a[1] + c[2] * a[2];
+    return 2.0 * std::atan2(num, den);
 }
 
 Real skyrmion_number(const RArray& S0, const RArray& S1,
@@ -486,58 +500,44 @@ Real skyrmion_number(const RArray& S0, const RArray& S1,
                      const RArray& x, const RArray& y) {
     size_t Nx = x.size();
     size_t Ny = y.size();
-    Real Q = 0.0;
 
-    Real dx = x[1] - x[0];
-    Real dy = y[1] - y[0];
-
-    // Finite-difference computation of n · (dn_x × dn_y)
-    // n = (S1, S2, S3) / S0
-    for (size_t j = 1; j < Ny - 1; ++j) {
-        for (size_t i = 1; i < Nx - 1; ++i) {
+    // Normalized Stokes (unit) vectors, one per pixel. Mirrors the Python
+    // core: n = (S1,S2,S3)/S0 then re-normalized; zero-intensity pixels
+    // become the zero vector (S0==0 -> divide by 1).
+    std::vector<std::array<Real, 3>> n(Nx * Ny);
+    for (size_t j = 0; j < Ny; ++j) {
+        for (size_t i = 0; i < Nx; ++i) {
             size_t idx = j * Nx + i;
-
-            // Normalized Stokes vector components
             Real s0 = S0[idx];
-            if (s0 < 1e-12) continue;  // avoid division by zero
-
-            Real nx = S1[idx] / s0;
-            Real ny = S2[idx] / s0;
-            Real nz = S3[idx] / s0;
-
-            // Neighbors for finite differences
-            size_t idx_r = j * Nx + (i + 1);
-            size_t idx_l = j * Nx + (i - 1);
-            size_t idx_d = (j + 1) * Nx + i;
-            size_t idx_u = (j - 1) * Nx + i;
-
-            Real s0_r = S0[idx_r], s0_l = S0[idx_l];
-            Real s0_d = S0[idx_d], s0_u = S0[idx_u];
-
-            if (s0_r < 1e-12 || s0_l < 1e-12 ||
-                s0_d < 1e-12 || s0_u < 1e-12) continue;
-
-            // dn/dx
-            Real dnx_dx = (S1[idx_r] / s0_r - S1[idx_l] / s0_l) / (2.0 * dx);
-            Real dny_dx = (S2[idx_r] / s0_r - S2[idx_l] / s0_l) / (2.0 * dx);
-            Real dnz_dx = (S3[idx_r] / s0_r - S3[idx_l] / s0_l) / (2.0 * dx);
-
-            // dn/dy
-            Real dnx_dy = (S1[idx_d] / s0_d - S1[idx_u] / s0_u) / (2.0 * dy);
-            Real dny_dy = (S2[idx_d] / s0_d - S2[idx_u] / s0_u) / (2.0 * dy);
-            Real dnz_dy = (S3[idx_d] / s0_d - S3[idx_u] / s0_u) / (2.0 * dy);
-
-            // n · (dn_x × dn_y)
-            Real cross_x = dny_dx * dnz_dy - dnz_dx * dny_dy;
-            Real cross_y = dnz_dx * dnx_dy - dnx_dx * dnz_dy;
-            Real cross_z = dnx_dx * dny_dy - dny_dx * dnx_dy;
-
-            Q += nx * cross_x + ny * cross_y + nz * cross_z;
+            Real inv = (s0 > 0.0) ? 1.0 / s0 : 1.0;
+            Real nx = S1[idx] * inv;
+            Real ny = S2[idx] * inv;
+            Real nz = S3[idx] * inv;
+            Real norm = std::sqrt(nx * nx + ny * ny + nz * nz);
+            if (norm > 0.0) {
+                n[idx] = {nx / norm, ny / norm, nz / norm};
+            } else {
+                n[idx] = {0.0, 0.0, 0.0};
+            }
         }
     }
 
-    Q = Q * dx * dy / (4.0 * M_PI);
-    return Q;
+    // Gauge-invariant lattice solid-angle (plaquette) method. Each
+    // elementary cell (a=n00, b=n01, c=n11, d=n10) is split into
+    // triangles (a, c, b) and (a, d, c), matching the Python core's
+    // vertex ordering so Q == +q for a skyrmion of charge q.
+    Real Q = 0.0;
+    for (size_t j = 0; j < Ny - 1; ++j) {
+        for (size_t i = 0; i < Nx - 1; ++i) {
+            const std::array<Real, 3>& a = n[j * Nx + i];
+            const std::array<Real, 3>& b = n[j * Nx + i + 1];
+            const std::array<Real, 3>& c = n[(j + 1) * Nx + i + 1];
+            const std::array<Real, 3>& d = n[(j + 1) * Nx + i];
+            Q += solid_angle_triangle(a, c, b);
+            Q += solid_angle_triangle(a, d, c);
+        }
+    }
+    return Q / (4.0 * M_PI);
 }
 
 } // namespace xpock
