@@ -1,0 +1,3 @@
+[submodule "ENGINES"]
+	path = ENGINES
+	url = https://github.com/hxlabz/computational-engines.git
