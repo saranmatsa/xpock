@@ -515,8 +515,15 @@ class TopologicalCharge:
         x: np.ndarray,
         y: np.ndarray,
     ) -> np.ndarray:
-        """Multiply field by exp(i * charge * phi) to imprint a vortex."""
+        """Multiply field by exp(i * charge * phi) to imprint a vortex.
+
+        phi is broadcast against the field, so the vortex can be applied to
+        2D fields as well as (ny, nx, nt) or (nz, ny, nx, nt) volumes.
+        """
         phi = np.arctan2(y, x)
+        # Append trailing axes so phi broadcasts over z/t dimensions.
+        while phi.ndim < field.ndim:
+            phi = phi[..., np.newaxis]
         return field * np.exp(1j * self.cfg.charge * phi)
 
     def compute_winding_number(
