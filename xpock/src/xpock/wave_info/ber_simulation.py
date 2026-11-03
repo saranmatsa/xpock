@@ -275,6 +275,17 @@ class BERSimulator:
 
                 # Generate skyrmion field (same for all trials at this N)
                 Ex_tx, Ey_tx, _ = modem.modulate(bits_tx, self.grid_x, self.grid_y)
+                # Normalize the two-component field to unit TOTAL power so
+                # the SKM link transmits the same optical power as the
+                # scalar OAM/intensity baselines (fair comparison).
+                # The pole-free Jones texture has |Ex|^2 + |Ey|^2 = 1
+                # pointwise, so its raw total power equals the number of
+                # grid pixels (~4096x a unit-power scalar field).
+                p_tx = float(np.sum(np.abs(Ex_tx) ** 2 + np.abs(Ey_tx) ** 2) * self.dx * self.dy)
+                if p_tx > 0:
+                    scale = np.sqrt(1.0 / p_tx)
+                    Ex_tx = Ex_tx * scale
+                    Ey_tx = Ey_tx * scale
 
                 n_errors = 0
                 n_symbol_errors = 0
