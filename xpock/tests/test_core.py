@@ -246,6 +246,50 @@ def test_polarization_circular():
         assert np.allclose(np.abs(Ey), 1.0 / np.sqrt(2.0))
 
 
+def test_polarization_circular_dop_is_one():
+    """A pure circularly polarized Jones state must NOT be labelled
+    unpolarized: its pointwise degree of polarization is exactly 1."""
+    x = np.linspace(-1, 1, 32)
+    y = np.linspace(-1, 1, 32)
+    X, Y = np.meshgrid(x, y, indexing="xy")
+    for handedness in [+1, -1]:
+        cfg = PolarizationConfig(state=PolarizationState.CIRCULAR,
+                                 handedness=handedness)
+        Ex, Ey = PolarizationTexture(cfg).evaluate(X, Y)
+        S0 = np.abs(Ex) ** 2 + np.abs(Ey) ** 2
+        S1 = np.abs(Ex) ** 2 - np.abs(Ey) ** 2
+        S2 = 2.0 * np.real(Ex * np.conj(Ey))
+        S3 = 2.0 * np.imag(Ex * np.conj(Ey))
+        dop_pt = np.sqrt(S1 ** 2 + S2 ** 2 + S3 ** 2) / np.where(S0 == 0,
+                                                                  1e-15, S0)
+        assert np.allclose(dop_pt, 1.0, atol=1e-12), (
+            f"circular h={handedness} DOP != 1: {np.unique(dop_pt)}")
+
+
+def test_jones_cannot_be_unpolarized():
+    """Falsification: the UNPOLARIZED Jones state cannot yield DOP < 1.
+
+    A Jones vector is a pure state, so S0^2 == S1^2+S2^2+S3^2 pointwise
+    and DOP == 1 exactly. This test DOCUMENTS the limitation rather than
+    asserting false unpolarized behavior. True unpolarized light requires
+    a density-matrix / ensemble formalism (CoherenceModel).
+    """
+    x = np.linspace(-1, 1, 32)
+    y = np.linspace(-1, 1, 32)
+    X, Y = np.meshgrid(x, y, indexing="xy")
+    cfg = PolarizationConfig(state=PolarizationState.UNPOLARIZED)
+    Ex, Ey = PolarizationTexture(cfg).evaluate(X, Y)
+    S0 = np.abs(Ex) ** 2 + np.abs(Ey) ** 2
+    S1 = np.abs(Ex) ** 2 - np.abs(Ey) ** 2
+    S2 = 2.0 * np.real(Ex * np.conj(Ey))
+    S3 = 2.0 * np.imag(Ex * np.conj(Ey))
+    dop_pt = np.sqrt(S1 ** 2 + S2 ** 2 + S3 ** 2) / np.where(S0 == 0,
+                                                              1e-15, S0)
+    # Jones calculus is pure-state: DOP is exactly 1, NOT < 1.
+    assert np.allclose(dop_pt, 1.0, atol=1e-12), (
+        f"UNPOLARIZED Jones DOP != 1: {np.unique(dop_pt)}")
+
+
 def test_polarization_radial():
     x = np.linspace(-1, 1, 17)  # includes exactly 0.0 and 1.0
     y = np.linspace(-1, 1, 17)

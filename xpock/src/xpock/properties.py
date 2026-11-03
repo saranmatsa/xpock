@@ -349,6 +349,15 @@ class PolarizationTexture:
     Returns Ex, Ey complex component fields (Ez = 0 for paraxial).
     Supports linear, circular, elliptical, radial, azimuthal, spatially
     varying Jones fields, and skyrmion textures.
+
+    Scientific limitation: a Jones vector is a *pure* polarization state,
+    so at every point S0^2 = S1^2 + S2^2 + S3^2 and the pointwise degree of
+    polarization is exactly 1. Jones calculus therefore CANNOT represent
+    truly unpolarized or partially polarized light (DOP < 1), which requires
+    a density-matrix / coherency-matrix or ensemble-average formalism
+    (see xpock.properties.CoherenceModel). The UNPOLARIZED state below
+    returns one coherent Jones realization; its DOP is 1, not 0. It is kept
+    for API completeness but must not be interpreted as unpolarized light.
     """
 
     def __init__(self, config: PolarizationConfig):
@@ -471,8 +480,13 @@ class PolarizationTexture:
         return np.asarray(Ex, dtype=np.complex128), np.asarray(Ey, dtype=np.complex128)
 
     def _unpolarized(self, x, y):
-        # Model as incoherent sum: return equal-intensity random phase components
-        # Represented as a coherent Jones vector with random phase (one realization)
+        # NOTE (scientific honesty): a single Jones vector is a pure state,
+        # so this CANNOT be truly unpolarized (DOP would be 0). It returns one
+        # coherent realization of equal-intensity quadrature components; the
+        # pointwise DOP is exactly 1. True unpolarized light requires a
+        # density-matrix / ensemble-average formalism (CoherenceModel).
+        # This state is kept for API completeness and is deliberately NOT
+        # labeled as producing DOP < 1.
         rng = np.random.default_rng(42)
         phase = rng.uniform(0, 2 * np.pi, x.shape)
         Ex = (1.0 / np.sqrt(2.0)) * np.exp(1j * phase)
