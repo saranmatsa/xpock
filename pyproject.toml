@@ -7,7 +7,7 @@ name = "xpock"
 version = "0.1.0"
 description = "XPOCK — Wave-Structure Generator: finite physical wave events with independently controllable physical properties"
 requires-python = ">=3.9"
-authors = [{ name = "xpock", email = "xpock@local" }]
+authors = [{ name = "xpock" }]
 license = { text = "Proprietary — research use" }
 readme = "xpock/README.md"
 keywords = ["wave", "optics", "topological", "skyrmion", "vortex", "spatiotemporal", "information"]
@@ -28,9 +28,8 @@ dev = [
 [project.scripts]
 xpock = "xpock.cli:main"
 
-[tool.setuptools]
-package-dir = {"" = "xpock/src"}
-packages = ["xpock", "xpock.*"]
+[tool.setuptools.packages.find]
+where = ["xpock/src"]
 
 [tool.pytest.ini_options]
 testpaths = ["xpock/tests"]
