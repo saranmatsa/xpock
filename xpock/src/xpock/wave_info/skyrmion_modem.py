@@ -105,10 +105,16 @@ class SkyrmionModem:
     def __init__(self, config: ModemConfig):
         self.cfg = config
         self._constellation = sorted(set(config.constellation))
-        self._n_bits = int(np.floor(np.log2(len(self._constellation))))
+        n_states = len(self._constellation)
+        # ceil(log2(n_states)) so that every constellation state is reachable:
+        # with n_bits = ceil(log2(n_states)), indices 0 .. 2**n_bits - 1 cover
+        # 0 .. n_states - 1. floor(log2(n_states)) would silently leave the
+        # highest states unreachable (e.g. a 5-state constellation with 2 bits
+        # can only ever reach indices 0..3).
+        self._n_bits = int(np.ceil(np.log2(n_states))) if n_states > 1 else 1
         if self._n_bits < 1:
             raise ValueError(
-                f"Constellation must have at least 2 values, got {len(self._constellation)}"
+                f"Constellation must have at least 2 values, got {n_states}"
             )
 
     @property
@@ -129,26 +135,43 @@ class SkyrmionModem:
         Parameters
         ----------
         bits : array-like of int (0/1)
-            Bit string of length n_bits.
+            Bit string of length n_bits. Every bit must be 0 or 1.
 
         Returns
         -------
         n : int
             Skyrmion number from constellation.
+
+        Notes
+        -----
+        Mapping: bit string -> unsigned integer index -> constellation[index].
+        Valid indices are 0 .. n_states - 1. With n_bits = ceil(log2(n_states))
+        every constellation state has at least one bit string (some indices in
+        0 .. 2**n_bits - 1 are unused for non-power-of-two constellations and
+        are rejected as invalid input rather than silently folded back by a
+        modulo, which would make some states unreachable and others double).
+        Incomplete final bit groups (length != n_bits) are invalid input.
         """
         bits = np.asarray(bits, dtype=int)
         if len(bits) != self._n_bits:
             raise ValueError(
-                f"Expected {self._n_bits} bits, got {len(bits)}"
+                f"Expected {self._n_bits} bits, got {len(bits)} "
+                f"(incomplete final bit groups are invalid input)"
             )
+        if np.any((bits != 0) & (bits != 1)):
+            raise ValueError(f"Bits must be 0 or 1, got {bits}")
 
-        # Convert bit string to integer index
+        # Convert bit string to integer index (MSB first)
         idx = 0
         for b in bits:
             idx = (idx << 1) | int(b)
 
-        # Map to constellation (cyclic if idx > n_states-1)
-        idx = idx % self.n_states
+        if idx >= self.n_states:
+            raise ValueError(
+                f"Bit string encodes index {idx}, which is outside the "
+                f"constellation range 0..{self.n_states - 1} "
+                f"(non-power-of-two alphabet: indices >= n_states are unused)"
+            )
         return self._constellation[idx]
 
     def skyrmion_to_bits(self, n: int) -> np.ndarray:
@@ -157,18 +180,26 @@ class SkyrmionModem:
         Parameters
         ----------
         n : int
-            Received skyrmion number.
+            Received skyrmion number. Must be a member of the constellation;
+            values outside the constellation are invalid input (the demodulator
+            uses :meth:`_nearest_constellation` for its hard decision).
 
         Returns
         -------
         bits : np.ndarray of int
-            Recovered bit string.
+            Recovered bit string of length n_bits.
+
+        Raises
+        ------
+        ValueError
+            If ``n`` is not a constellation member.
         """
         try:
             idx = self._constellation.index(int(n))
         except ValueError:
-            # Find nearest constellation value
-            idx = int(np.argmin([abs(n - c) for c in self._constellation]))
+            raise ValueError(
+                f"Skyrmion number {n} is not in constellation {self._constellation}"
+            ) from None
 
         bits = []
         for i in range(self._n_bits - 1, -1, -1):
@@ -306,18 +337,37 @@ def quick_modem_test():
     )
     modem = SkyrmionModem(cfg)
 
-    # Test modulation/demodulation round-trip
-    bits = np.array([1, 0, 1])
-    Ex, Ey, n_tx = modem.modulate(bits, X, Y)
-    q_measured, n_rx = modem.demodulate(Ex, Ey)
-    bits_rx = modem.skyrmion_to_bits(n_rx)
+    # Test modulation/demodulation round-trip over ALL constellation states.
+    # With 5 states, n_bits = ceil(log2(5)) = 3; indices 0..4 are valid,
+    # indices 5..7 are rejected as invalid input.
+    for n_tx in modem.constellation:
+        bit_idx = modem.constellation.index(n_tx)
+        bits_tx = np.array(
+            [(bit_idx >> i) & 1 for i in range(modem.n_bits - 1, -1, -1)]
+        )
+        Ex, Ey, n_returned = modem.modulate(bits_tx, X, Y)
+        assert n_returned == n_tx, f"{n_tx}: modulate returned {n_returned}"
+        q_measured, n_rx = modem.demodulate(Ex, Ey)
+        bits_rx = modem.skyrmion_to_bits(n_rx)
+        print(
+            f"  N={n_tx:+d} bits={bits_tx.tolist()} Q={q_measured:+.4f} "
+            f"-> N_rx={n_rx} bits_rx={bits_rx.tolist()} "
+            f"roundtrip={np.array_equal(bits_tx, bits_rx)}"
+        )
+        assert n_rx == n_tx
 
-    print(f"Transmitted N: {n_tx}")
-    print(f"Measured Q: {q_measured:.4f}")
-    print(f"Recovered N: {n_rx}")
-    print(f"Bits tx: {bits}")
-    print(f"Bits rx: {bits_rx}")
-    print(f"Bit error: {not np.array_equal(bits, bits_rx)}")
+    # Invalid input: index outside constellation range must be rejected
+    try:
+        modem.bits_to_skyrmion(np.array([1, 1, 1]))  # index 7 >= 5 states
+        raise AssertionError("bits_to_skyrmion accepted out-of-range index 7")
+    except ValueError:
+        pass
+    try:
+        modem.skyrmion_to_bits(99)  # not in constellation
+        raise AssertionError("skyrmion_to_bits accepted non-constellation value")
+    except ValueError:
+        pass
+
     print(f"Constellation: {modem.constellation}")
     print(f"Bits per symbol: {modem.n_bits}")
 
