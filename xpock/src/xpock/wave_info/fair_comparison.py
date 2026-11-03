@@ -584,7 +584,14 @@ class FairComparison:
             bits_tx = np.array(
                 [(level_idx >> i) & 1 for i in range(n_bits - 1, -1, -1)]
             )
-            E_tx = level * gaussian
+            # Intensity levels represent TRANSMITTED POWER (matching the units
+            # of measured_I = integral(|E|^2) dx dy below). gaussian is
+            # normalized to unit power, so E_tx = sqrt(level) * gaussian
+            # transmits power == level. Average of levels [0.5, 1.5] = 1.0 ==
+            # SKM unit power -> fair on average. Comparing power against
+            # amplitude levels (the previous code) was a unit mismatch and
+            # biased the decision boundaries.
+            E_tx = np.sqrt(level) * gaussian
 
             phase_screens, amplitude_screens = self._fresh_screens(
                 turb_model, n_screens, dz
