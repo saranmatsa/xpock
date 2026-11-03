@@ -20,6 +20,20 @@ import sys
 import numpy as np
 
 
+
+from pathlib import Path
+
+_HERE = Path(__file__).resolve()
+
+
+def _src_path(*parts: str) -> str:
+    """Locate src/xpock/... relative to the repository root, independent of CWD."""
+    for base in [_HERE.parent] + list(_HERE.parents):
+        cand = base.joinpath("src", *parts)
+        if cand.exists():
+            return str(cand)
+    raise FileNotFoundError(f"src/{'/'.join(parts)} not found above {_HERE}")
+
 def _load_module(name, path):
     spec = importlib.util.spec_from_file_location(name, path)
     mod = importlib.util.module_from_spec(spec)
@@ -30,11 +44,11 @@ def _load_module(name, path):
 
 turbulence_mod = _load_module(
     'xpock.wave_info.turbulence_t1_002',
-    'src/xpock/wave_info/turbulence.py',
+    _src_path("xpock", "wave_info", "turbulence.py"),
 )
 skyrmion_modem_mod = _load_module(
     'xpock.wave_info.skyrmion_modem_t1_002',
-    'src/xpock/wave_info/skyrmion_modem.py',
+    _src_path("xpock", "wave_info", "skyrmion_modem.py"),
 )
 
 TurbulenceConfig = turbulence_mod.TurbulenceConfig

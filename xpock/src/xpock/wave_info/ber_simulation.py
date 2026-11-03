@@ -33,7 +33,20 @@ from xpock.wave_info.skyrmion_modem import (
 
 @dataclass
 class BERResult:
-    """BER simulation result for a single (N, Cn²) configuration."""
+    """BER simulation result for a single (N, Cn²) configuration.
+
+    BER and SER are counted independently:
+    - n_errors   : bit errors (Hamming distance between transmitted and
+                   received bit strings, summed over all symbols)
+    - n_symbol_errors : symbols whose recovered bit string differs at all
+    - n_total_bits : total bits transmitted (n_symbols * n_bits)
+    - ber        : n_errors / n_total_bits  (bit error rate)
+    - ser        : n_symbol_errors / n_symbols  (symbol error rate)
+    - ber_ci_lo / ber_ci_hi : 95% confidence interval on the BER (Wilson
+      score interval). With zero observed errors the upper bound is the
+      rule-of-three style bound 1 - 0.05**(1/n_symbols); a true BER of
+      exactly zero is never claimed from a finite simulation.
+    """
 
     n_tx: int                      # Transmitted skyrmion number
     cn2: float                     # Turbulence strength
@@ -42,10 +55,14 @@ class BERResult:
     ser: float                     # Symbol error rate
     n_trials: int                  # Number of trials
     n_errors: int                  # Number of bit errors
+    n_symbol_errors: int           # Number of symbols in error
+    n_total_bits: int              # Total bits transmitted
     n_symbols: int                 # Number of symbols transmitted
     q_mean: float                  # Mean measured skyrmion number
     q_std: float                   # Std dev of measured skyrmion number
     confusion_matrix: Dict[str, int]  # "tx_N->rx_N": count
+    ber_ci_lo: float = 0.0         # 95% CI lower bound on BER
+    ber_ci_hi: float = 0.0         # 95% CI upper bound on BER
     notes: List[str] = field(default_factory=list)
 
 
@@ -58,11 +75,55 @@ class OAMResult:
     ber: float                     # Bit error rate
     ser: float                     # Symbol error rate
     n_trials: int
-    n_errors: int
-    n_symbols: int
+    n_errors: int                  # Number of bit errors
+    n_symbol_errors: int           # Number of symbols in error
+    n_total_bits: int              # Total bits transmitted
+    n_symbols: int                 # Number of symbols transmitted
     mode_overlap_mean: float       # Mean overlap with transmitted mode
     mode_overlap_std: float
+    ber_ci_lo: float = 0.0         # 95% CI lower bound on BER
+    ber_ci_hi: float = 0.0         # 95% CI upper bound on BER
     notes: List[str] = field(default_factory=list)
+
+
+def _ber_confidence_interval(
+    n_errors: int, n_total_bits: int, alpha: float = 0.05
+) -> Tuple[float, float]:
+    """95% confidence interval for a binomial BER proportion (Wilson score).
+
+    Parameters
+    ----------
+    n_errors : int
+        Number of observed bit errors.
+    n_total_bits : int
+        Total number of transmitted bits.
+    alpha : float
+        Significance level (0.05 -> 95% interval).
+
+    Returns
+    -------
+    (lo, hi) : tuple of float
+        Confidence interval bounds. With zero observed errors the upper
+        bound is the rule-of-three style bound
+        1 - (1 - alpha) ** (1 / n_total_bits); a true BER of exactly zero
+        is never claimed from a finite simulation. With n_total_bits == 0
+        returns (0.0, 0.0).
+    """
+    if n_total_bits <= 0:
+        return 0.0, 0.0
+    p = n_errors / n_total_bits
+    if p == 0.0:
+        # Zero observed errors: upper confidence bound only, never BER == 0
+        return 0.0, 1.0 - (1.0 - alpha) ** (1.0 / n_total_bits)
+    if p == 1.0:
+        return (1.0 - alpha) ** (1.0 / n_total_bits), 1.0
+    z = 1.959963984540054  # 97.5th percentile of the standard normal
+    denom = 1.0 + z**2 / n_total_bits
+    center = (p + z**2 / (2.0 * n_total_bits)) / denom
+    half = (z / denom) * np.sqrt(
+        p * (1.0 - p) / n_total_bits + z**2 / (4.0 * n_total_bits**2)
+    )
+    return float(max(0.0, center - half)), float(min(1.0, center + half))
 
 
 class BERSimulator:
@@ -214,8 +275,20 @@ class BERSimulator:
 
                 # Generate skyrmion field (same for all trials at this N)
                 Ex_tx, Ey_tx, _ = modem.modulate(bits_tx, self.grid_x, self.grid_y)
+                # Normalize the two-component field to unit TOTAL power so
+                # the SKM link transmits the same optical power as the
+                # scalar OAM/intensity baselines (fair comparison).
+                # The pole-free Jones texture has |Ex|^2 + |Ey|^2 = 1
+                # pointwise, so its raw total power equals the number of
+                # grid pixels (~4096x a unit-power scalar field).
+                p_tx = float(np.sum(np.abs(Ex_tx) ** 2 + np.abs(Ey_tx) ** 2) * self.dx * self.dy)
+                if p_tx > 0:
+                    scale = np.sqrt(1.0 / p_tx)
+                    Ex_tx = Ex_tx * scale
+                    Ey_tx = Ey_tx * scale
 
                 n_errors = 0
+                n_symbol_errors = 0
                 n_symbols = 0
                 q_values = []
                 confusion = {}
@@ -242,17 +315,26 @@ class BERSimulator:
                     q_measured, n_rx = modem.demodulate(E_rx, E_rx_y)
                     q_values.append(q_measured)
 
-                    # Decode bits
+                    # Decode bits; count bit errors (Hamming distance) and
+                    # symbol errors independently. A symbol error with k
+                    # differing bits contributes k bit errors but one symbol
+                    # error — ber and ser are NOT the same quantity.
                     bits_rx = modem.skyrmion_to_bits(n_rx)
-                    bit_error = not np.array_equal(bits_tx, bits_rx)
-                    n_errors += int(bit_error)
+                    bit_errors_this_symbol = int(np.sum(bits_tx != bits_rx))
+                    symbol_error = int(bit_errors_this_symbol > 0)
+                    n_errors += bit_errors_this_symbol
+                    n_symbol_errors += symbol_error
                     n_symbols += 1
 
                     key = f"{n_tx}->{n_rx}"
                     confusion[key] = confusion.get(key, 0) + 1
 
-                ber = n_errors / n_symbols if n_symbols > 0 else 0.0
-                ser = ber  # Same for single-symbol transmission
+                n_total_bits = n_symbols * n_bits
+                ber = n_errors / n_total_bits if n_total_bits > 0 else 0.0
+                ser = n_symbol_errors / n_symbols if n_symbols > 0 else 0.0
+                ber_ci_lo, ber_ci_hi = _ber_confidence_interval(
+                    n_errors, n_total_bits
+                )
 
                 results.append(
                     BERResult(
@@ -263,16 +345,24 @@ class BERSimulator:
                         ser=float(ser),
                         n_trials=n_trials_per_config,
                         n_errors=n_errors,
+                        n_symbol_errors=n_symbol_errors,
+                        n_total_bits=n_total_bits,
                         n_symbols=n_symbols,
                         q_mean=float(np.mean(q_values)) if q_values else 0.0,
                         q_std=float(np.std(q_values)) if q_values else 0.0,
                         confusion_matrix=confusion,
+                        ber_ci_lo=float(ber_ci_lo),
+                        ber_ci_hi=float(ber_ci_hi),
                         notes=[],
                     )
                 )
 
                 if verbose:
-                    print(f"BER={ber:.6f} ({n_errors}/{n_symbols}), Q={np.mean(q_values):+.4f}±{np.std(q_values):.4f}")
+                    print(
+                        f"BER={ber:.6f} ({n_errors}/{n_total_bits} bits), "
+                        f"SER={ser:.6f} ({n_symbol_errors}/{n_symbols} symbols), "
+                        f"Q={np.mean(q_values):+.4f}±{np.std(q_values):.4f}"
+                    )
 
         if verbose:
             print()
@@ -316,14 +406,14 @@ class BERSimulator:
             print("OAM MULTIPLEXING — BER SIMULATION (BASELINE)")
             print("=" * 70)
             print(f"OAM modes: {oam_modes}")
-            print(f"States: {len(oam_modes)}, Bits/symbol: {int(np.floor(np.log2(len(oam_modes))))}")
+            print(f"States: {len(oam_modes)}, Bits/symbol: {n_bits}")
             print(f"Distance: {distance} m, Wavelength: {self.wavelength*1e9:.0f} nm")
             print(f"Beam waist: {waist} m")
             print(f"Trials per config: {n_trials_per_config}")
             print(f"Cn² values: {cn2_values}")
             print()
 
-        n_bits = int(np.floor(np.log2(len(oam_modes))))
+        n_bits = int(np.ceil(np.log2(len(oam_modes)))) if len(oam_modes) > 1 else 1
         results = []
         total_configs = len(oam_modes) * len(cn2_values)
         config_idx = 0
@@ -377,6 +467,7 @@ class BERSimulator:
                 E_tx = mode_fields[l_tx].copy()
 
                 n_errors = 0
+                n_symbol_errors = 0
                 n_symbols = 0
                 overlaps = []
                 confusion = {}
@@ -405,16 +496,24 @@ class BERSimulator:
                     l_rx = max(overlap_vals, key=overlap_vals.get)
                     overlaps.append(overlap_vals[l_tx])
 
-                    bits_rx = np.array([(oam_modes.index(l_rx) >> i) & 1 for i in range(n_bits - 1, -1, -1)])
-                    bit_error = not np.array_equal(bits_tx, bits_rx)
-                    n_errors += int(bit_error)
+                    bits_rx = np.array(
+                        [(oam_modes.index(l_rx) >> i) & 1 for i in range(n_bits - 1, -1, -1)]
+                    )
+                    bit_errors_this_symbol = int(np.sum(bits_tx != bits_rx))
+                    symbol_error = int(bit_errors_this_symbol > 0)
+                    n_errors += bit_errors_this_symbol
+                    n_symbol_errors += symbol_error
                     n_symbols += 1
 
                     key = f"{l_tx}->{l_rx}"
                     confusion[key] = confusion.get(key, 0) + 1
 
-                ber = n_errors / n_symbols if n_symbols > 0 else 0.0
-                ser = ber
+                n_total_bits = n_symbols * n_bits
+                ber = n_errors / n_total_bits if n_total_bits > 0 else 0.0
+                ser = n_symbol_errors / n_symbols if n_symbols > 0 else 0.0
+                ber_ci_lo, ber_ci_hi = _ber_confidence_interval(
+                    n_errors, n_total_bits
+                )
 
                 results.append(
                     OAMResult(
@@ -424,15 +523,23 @@ class BERSimulator:
                         ser=float(ser),
                         n_trials=n_trials_per_config,
                         n_errors=n_errors,
+                        n_symbol_errors=n_symbol_errors,
+                        n_total_bits=n_total_bits,
                         n_symbols=n_symbols,
                         mode_overlap_mean=float(np.mean(overlaps)) if overlaps else 0.0,
                         mode_overlap_std=float(np.std(overlaps)) if overlaps else 0.0,
+                        ber_ci_lo=float(ber_ci_lo),
+                        ber_ci_hi=float(ber_ci_hi),
                         notes=[],
                     )
                 )
 
                 if verbose:
-                    print(f"BER={ber:.6f} ({n_errors}/{n_symbols}), overlap={np.mean(overlaps):.4f}±{np.std(overlaps):.4f}")
+                    print(
+                        f"BER={ber:.6f} ({n_errors}/{n_total_bits} bits), "
+                        f"SER={ser:.6f} ({n_symbol_errors}/{n_symbols} symbols), "
+                        f"overlap={np.mean(overlaps):.4f}±{np.std(overlaps):.4f}"
+                    )
 
         if verbose:
             print()

@@ -422,9 +422,19 @@ class FairComparison:
                 [(bit_idx >> i) & 1 for i in range(n_bits - 1, -1, -1)]
             )
             Ex_tx, Ey_tx, _ = modem.modulate(bits_tx, self.X, self.Y)
-            # Normalize to unit power
-            Ex_tx = normalize_power(Ex_tx, self.dx, self.dy, 1.0)
-            Ey_tx = normalize_power(Ey_tx, self.dx, self.dy, 1.0)
+            # Normalize the TWO-COMPONENT field to unit TOTAL power.
+            # Normalizing Ex and Ey each to unit power would give the SKM
+            # link twice the launch power of the scalar OAM/intensity
+            # baselines — an unfair comparison. The transmitted optical
+            # power is integral(|Ex|^2 + |Ey|^2) dx dy and must match the
+            # unit power of the scalar schemes.
+            p_ex = total_power(Ex_tx, self.dx, self.dy)
+            p_ey = total_power(Ey_tx, self.dx, self.dy)
+            p_tot = p_ex + p_ey
+            if p_tot > 0:
+                scale = np.sqrt(1.0 / p_tot)
+                Ex_tx = Ex_tx * scale
+                Ey_tx = Ey_tx * scale
 
             phase_screens, amplitude_screens = self._fresh_screens(
                 turb_model, n_screens, dz

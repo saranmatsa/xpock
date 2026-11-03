@@ -24,6 +24,7 @@
 #include <complex>
 #include <vector>
 #include <string>
+#include <array>
 #include <cmath>
 #include <stdexcept>
 
@@ -197,25 +198,46 @@ int winding_number(const RArray& phase, const RArray& x, const RArray& y);
 /**
  * Generate a skyrmionic polarization texture on a 2D grid.
  *
- * The field is |Psi> = |l1>|H> + |l2>|V> where skyrmion number
- * Q = l1 - l2. Ex and Ey components encode the polarization texture.
+ * Canonical implementation (matches XPOCK Python core, validated to give
+ * exactly integer skyrmion numbers):
+ *
+ *   theta(r) = pi * clamp(r / w, 0, 1)     // clamped: 0 at centre, pi at r=w,
+ *                                          // uniform boundary beyond w
+ *   Ex = cos(theta/2)
+ *   Ey = sin(theta/2) * exp(i * q * phi)   // pole-free Jones vector,
+ *                                          // |Ex|^2 + |Ey|^2 == 1 everywhere
+ *
+ * This yields the normalized Stokes vector
+ *   n = (cos theta, sin theta cos(q phi), sin theta sin(q phi))
+ * which wraps the Bloch sphere once for charge q. The previous LG-pair
+ * construction (l1, l2) with an unclamped theta and the singular
+ * Stokes->Jones pole mapping did NOT reproduce the Python skyrmion number
+ * and has been replaced by this canonical form.
  *
  * @param x   x coordinates (size Nx)
  * @param y   y coordinates (size Ny)
- * @param l1  OAM of horizontal component
- * @param l2  OAM of vertical component
+ * @param q   topological (skyrmion) charge
  * @param w   skyrmion texture radius (m)
  * @param Ex  output Ex field (size Ny*Nx)
  * @param Ey  output Ey field (size Ny*Nx)
  */
 void skyrmion_field(const RArray& x, const RArray& y,
-                    int l1, int l2, Real w,
+                    int q, Real w,
                     CArray& Ex, CArray& Ey);
 
 /**
- * Compute skyrmion number Q from Stokes parameters:
- *   Q = (1/4pi) * integral n · (dn_x × dn_y) dx dy
- * where n = (S1, S2, S3) / S0
+ * Compute skyrmion number Q from Stokes parameters using the
+ * gauge-invariant lattice solid-angle (plaquette) method:
+ *
+ *   Q = (1/4pi) * sum_over_plaquettes [ Omega(a,c,b) + Omega(a,d,c) ]
+ *
+ * where a=n00, b=n01, c=n11, d=n10 are the four normalized Stokes
+ * vectors of each elementary cell, and
+ *   Omega(u,v,w) = 2 * atan2( u . (v x w), 1 + u.v + v.w + w.u ).
+ *
+ * Matches the Python core exactly (exactly integer Q for a lattice
+ * skyrmion). Replaces the old finite-difference gradient product which
+ * under-resolved charge and was sensitive to branch cuts.
  *
  * @param S0  intensity (size Ny*Nx)
  * @param S1  Stokes Q (size Ny*Nx)
@@ -223,7 +245,7 @@ void skyrmion_field(const RArray& x, const RArray& y,
  * @param S3  Stokes V (size Ny*Nx)
  * @param x   x coordinates (size Nx)
  * @param y   y coordinates (size Ny)
- * @return    skyrmion number Q (should be near an integer)
+ * @return    skyrmion number Q (exactly an integer for a lattice skyrmion)
  */
 Real skyrmion_number(const RArray& S0, const RArray& S1,
                      const RArray& S2, const RArray& S3,

@@ -205,8 +205,19 @@ subroutine fresnel_propagate(u_in, z, wavelength, dx, n, u_out)
     call fft1d(U, n)
 
     ! Transfer function H(fx) = exp(i * k * z * sqrt(1 - (lambda*fx)^2))
+    ! H is even in fx, so the positive-sign convention of fft1d cancels
+    ! between the forward and inverse transforms; what matters is that
+    ! each FFT bin k carries its TRUE frequency. fft1d output is
+    ! unshifted: bin 1 (1-based) is DC, bins 2..n/2+1 are positive
+    ! frequencies (i-1)*df, bins n/2+2..n are negative (i-1-n)*df.
+    ! The old formula fx = (i - n/2 - 1) * df wrongly assumed an
+    ! fftshifted layout and applied H to the wrong frequency bins.
     do i = 1, n
-        fx = (i - n / 2 - 1) * df
+        if (i <= n / 2 + 1) then
+            fx = (i - 1) * df
+        else
+            fx = (i - 1 - n) * df
+        end if
         if (abs(wavelength * fx) <= 1.0_dp) then
             H(i) = cmplx(cos(k * z * sqrt(1.0_dp - (wavelength * fx)**2)),
                          sin(k * z * sqrt(1.0_dp - (wavelength * fx)**2)), dp)
@@ -256,14 +267,23 @@ end subroutine compute_stokes
 
 !-----------------------------------------------------------------------
 ! Skyrmion polarization texture field generation (Fortran)
-! |Psi> = |l1>|H> + |l2>|V>, skyrmion number Q = l1 - l2
+! Canonical form matching the XPOCK Python core:
+!
+!   theta(r) = pi * min(max(r / w, 0), 1)   ! clamped: 0 at centre,
+!                                           ! pi at r = w, uniform beyond
+!   Ex = cos(theta/2)
+!   Ey = sin(theta/2) * exp(i * q * phi)    ! pole-free Jones vector,
+!                                           ! |Ex|^2 + |Ey|^2 = 1
+!
+! The previous LG-pair construction (l1, l2) did not reproduce the
+! Python skyrmion number and has been replaced.
 !-----------------------------------------------------------------------
-subroutine skyrmion_field_f90(x, y, Nx, Ny, l1, l2, w, Ex, Ey)
+subroutine skyrmion_field_f90(x, y, Nx, Ny, q, w, Ex, Ey)
     real(dp), intent(in) :: x(Nx), y(Ny)
-    integer, intent(in) :: Nx, Ny, l1, l2
+    integer, intent(in) :: Nx, Ny, q
     real(dp), intent(in) :: w
     complex(dp), intent(out) :: Ex(Ny, Nx), Ey(Ny, Nx)
-    real(dp) :: X, Y, r, phi, env, radial1, radial2
+    real(dp) :: X, Y, r, phi, theta, half, sh
     real(dp) :: xc, yc
     integer :: i, j
     xc = 0.5_dp * (x(1) + x(Nx))
@@ -274,68 +294,89 @@ subroutine skyrmion_field_f90(x, y, Nx, Ny, l1, l2, w, Ex, Ey)
             Y = y(j) - yc
             r = sqrt(X**2 + Y**2)
             phi = atan2(Y, X)
-            env = exp(-(r / w)**2)
-            radial1 = (r / w)**abs(l1) * env
-            radial2 = (r / w)**abs(l2) * env
-            Ex(j, i) = radial1 * cmplx(cos(l1 * phi), sin(l1 * phi), dp)
-            Ey(j, i) = radial2 * cmplx(cos(l2 * phi), sin(l2 * phi), dp)
+            theta = PI * min(max(r / w, 0.0_dp), 1.0_dp)
+            half = theta / 2.0_dp
+            sh = sin(half)
+            Ex(j, i) = cmplx(cos(half), 0.0_dp, dp)
+            Ey(j, i) = cmplx(sh * cos(real(q, dp) * phi), &
+                             sh * sin(real(q, dp) * phi), dp)
         end do
     end do
 end subroutine skyrmion_field_f90
 
 !-----------------------------------------------------------------------
-! Skyrmion number Q from Stokes parameters
-! Q = (1/4pi) * integral n · (dn_x × dn_y) dx dy
-! where n = (S1, S2, S3) / S0
+! Scalar triple product u . (v x w)
+!-----------------------------------------------------------------------
+pure real(dp) function triple_dot(u, v, w)
+    real(dp), intent(in) :: u(3), v(3), w(3)
+    triple_dot = u(1) * (v(2) * w(3) - v(3) * w(2)) &
+               + u(2) * (v(3) * w(1) - v(1) * w(3)) &
+               + u(3) * (v(1) * w(2) - v(2) * w(1))
+end function triple_dot
+
+!-----------------------------------------------------------------------
+! Skyrmion number Q from Stokes parameters (Fortran)
+! Gauge-invariant lattice solid-angle (plaquette) method matching the
+! Python core:
+!
+!   Q = (1/4pi) * sum_over_cells [ Omega(a, c, b) + Omega(a, d, c) ]
+!
+! with a=n(j,i), b=n(j,i+1), c=n(j+1,i+1), d=n(j+1,i),
+! Omega(u,v,w) = 2 * atan2( u . (v x w), 1 + u.v + v.w + w.u ).
+!
+! Exactly integer Q for a lattice skyrmion. Replaces the old finite-
+! difference gradient product.
 !-----------------------------------------------------------------------
 real(dp) function skyrmion_number_f90(S0, S1, S2, S3, x, y, Nx, Ny)
     real(dp), intent(in) :: S0(Ny, Nx), S1(Ny, Nx), S2(Ny, Nx), S3(Ny, Nx)
     real(dp), intent(in) :: x(Nx), y(Ny)
     integer, intent(in) :: Nx, Ny
-    real(dp) :: Q, dx, dy
-    real(dp) :: nx, ny, nz
-    real(dp) :: dnx_dx, dny_dx, dnz_dx
-    real(dp) :: dnx_dy, dny_dy, dnz_dy
-    real(dp) :: cross_x, cross_y, cross_z
-    real(dp) :: nx_r, ny_r, nz_r, nx_l, ny_l, nz_l
-    real(dp) :: nx_d, ny_d, nz_d, nx_u, ny_u, nz_u
-    real(dp) :: s0_r, s0_l, s0_d, s0_u
+    real(dp) :: Q
+    real(dp), allocatable :: n(:, :, :)
+    real(dp) :: s0, inv, norm, num, den
     integer :: i, j
-    Q = 0.0_dp
-    dx = x(2) - x(1)
-    dy = y(2) - y(1)
-    do j = 2, Ny - 1
-        do i = 2, Nx - 1
-            s0_r = S0(j, i+1); s0_l = S0(j, i-1)
-            s0_d = S0(j+1, i); s0_u = S0(j-1, i)
-            if (S0(j,i) < 1e-12_dp) cycle
-            if (s0_r < 1e-12_dp .or. s0_l < 1e-12_dp) cycle
-            if (s0_d < 1e-12_dp .or. s0_u < 1e-12_dp) cycle
+    allocate(n(3, Nx, Ny))
 
-            nx = S1(j,i) / S0(j,i)
-            ny = S2(j,i) / S0(j,i)
-            nz = S3(j,i) / S0(j,i)
-
-            nx_r = S1(j,i+1) / s0_r; ny_r = S2(j,i+1) / s0_r; nz_r = S3(j,i+1) / s0_r
-            nx_l = S1(j,i-1) / s0_l; ny_l = S2(j,i-1) / s0_l; nz_l = S3(j,i-1) / s0_l
-            nx_d = S1(j+1,i) / s0_d; ny_d = S2(j+1,i) / s0_d; nz_d = S3(j+1,i) / s0_d
-            nx_u = S1(j-1,i) / s0_u; ny_u = S2(j-1,i) / s0_u; nz_u = S3(j-1,i) / s0_u
-
-            dnx_dx = (nx_r - nx_l) / (2.0_dp * dx)
-            dny_dx = (ny_r - ny_l) / (2.0_dp * dx)
-            dnz_dx = (nz_r - nz_l) / (2.0_dp * dx)
-
-            dnx_dy = (nx_d - nx_u) / (2.0_dp * dy)
-            dny_dy = (ny_d - ny_u) / (2.0_dp * dy)
-            dnz_dy = (nz_d - nz_u) / (2.0_dp * dy)
-
-            cross_x = dny_dx * dnz_dy - dnz_dx * dny_dy
-            cross_y = dnz_dx * dnx_dy - dnx_dx * dnz_dy
-            cross_z = dnx_dx * dny_dy - dny_dx * dnx_dy
-
-            Q = Q + nx * cross_x + ny * cross_y + nz * cross_z
+    ! Normalized unit Stokes vectors per pixel (zero vector where S0 == 0,
+    ! mirroring the Python core: divide by 1 when S0 == 0).
+    do j = 1, Ny
+        do i = 1, Nx
+            s0 = S0(j, i)
+            inv = 1.0_dp
+            if (s0 > 0.0_dp) inv = 1.0_dp / s0
+            norm = sqrt((S1(j, i) * inv)**2 + (S2(j, i) * inv)**2 & 
+                        + (S3(j, i) * inv)**2)
+            if (norm > 0.0_dp) then
+                n(1, i, j) = S1(j, i) * inv / norm
+                n(2, i, j) = S2(j, i) * inv / norm
+                n(3, i, j) = S3(j, i) * inv / norm
+            else
+                n(1, i, j) = 0.0_dp
+                n(2, i, j) = 0.0_dp
+                n(3, i, j) = 0.0_dp
+            end if
         end do
     end do
-    skyrmion_number_f90 = Q * dx * dy / (4.0_dp * PI)
+
+    Q = 0.0_dp
+    do j = 1, Ny - 1
+        do i = 1, Nx - 1
+            ! Cell (a=n00, b=n01, c=n11, d=n10); triangles (a,c,b) and (a,d,c)
+            num = triple_dot(n(:, i, j), n(:, i + 1, j + 1), n(:, i + 1, j))
+            den = 1.0_dp + dot_product(n(:, i, j), n(:, i + 1, j + 1)) &
+                  + dot_product(n(:, i + 1, j + 1), n(:, i + 1, j)) &
+                  + dot_product(n(:, i + 1, j), n(:, i, j))
+            Q = Q + 2.0_dp * atan2(num, den)
+
+            num = triple_dot(n(:, i, j), n(:, i, j + 1), n(:, i + 1, j + 1))
+            den = 1.0_dp + dot_product(n(:, i, j), n(:, i, j + 1)) &
+                  + dot_product(n(:, i, j + 1), n(:, i + 1, j + 1)) &
+                  + dot_product(n(:, i + 1, j + 1), n(:, i, j))
+            Q = Q + 2.0_dp * atan2(num, den)
+        end do
+    end do
+
+    deallocate(n)
+    skyrmion_number_f90 = Q / (4.0_dp * PI)
 end function skyrmion_number_f90
 end module xpock_wave_ops

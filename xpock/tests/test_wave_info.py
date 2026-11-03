@@ -14,11 +14,26 @@ physical feasibility.
 import numpy as np
 import importlib.util
 import sys
+import pytest
 
 
 # ----------------------------------------------------------------------
 # Load wave_info modules directly (no install required)
 # ----------------------------------------------------------------------
+
+from pathlib import Path
+
+_HERE = Path(__file__).resolve()
+
+
+def _src_path(*parts: str) -> str:
+    """Locate src/xpock/... relative to the repository root, independent of CWD."""
+    for base in [_HERE.parent] + list(_HERE.parents):
+        cand = base.joinpath("src", *parts)
+        if cand.exists():
+            return str(cand)
+    raise FileNotFoundError(f"src/{'/'.join(parts)} not found above {_HERE}")
+
 def _load_module(name, path):
     spec = importlib.util.spec_from_file_location(name, path)
     mod = importlib.util.module_from_spec(spec)
@@ -29,15 +44,15 @@ def _load_module(name, path):
 
 turbulence_mod = _load_module(
     'xpock.wave_info.turbulence_test',
-    'src/xpock/wave_info/turbulence.py',
+    _src_path("xpock", "wave_info", "turbulence.py"),
 )
 skyrmion_modem_mod = _load_module(
     'xpock.wave_info.skyrmion_modem_test',
-    'src/xpock/wave_info/skyrmion_modem.py',
+    _src_path("xpock", "wave_info", "skyrmion_modem.py"),
 )
 ber_sim_mod = _load_module(
     'xpock.wave_info.ber_simulation_test',
-    'src/xpock/wave_info/ber_simulation.py',
+    _src_path("xpock", "wave_info", "ber_simulation.py"),
 )
 
 TurbulenceConfig = turbulence_mod.TurbulenceConfig
@@ -179,7 +194,12 @@ def test_modem_bits_to_skyrmion_mapping():
 
 
 def test_modem_skyrmion_to_bits_mapping():
-    """skyrmion_to_bits maps skyrmion numbers back to bit strings."""
+    """skyrmion_to_bits maps skyrmion numbers back to bit strings.
+
+    Requires exact constellation membership: values outside the
+    constellation are invalid input (nearest-neighbor hard decision is the
+    demodulator's job, via _nearest_constellation).
+    """
     X, Y = _make_grid()
     cfg = ModemConfig(
         wavelength=1.55e-6,
@@ -193,9 +213,53 @@ def test_modem_skyrmion_to_bits_mapping():
     assert np.array_equal(modem.skyrmion_to_bits(-1), np.array([0]))
     assert np.array_equal(modem.skyrmion_to_bits(1), np.array([1]))
 
-    # Nearest constellation for out-of-range value
-    assert np.array_equal(modem.skyrmion_to_bits(-2), np.array([0]))  # nearest to -1
-    assert np.array_equal(modem.skyrmion_to_bits(2), np.array([1]))   # nearest to 1
+    # Out-of-constellation values are rejected as invalid input
+    with pytest.raises(ValueError):
+        modem.skyrmion_to_bits(-2)  # nearest to -1, but not a member
+    with pytest.raises(ValueError):
+        modem.skyrmion_to_bits(2)   # nearest to 1, but not a member
+    with pytest.raises(ValueError):
+        modem.skyrmion_to_bits(99)
+
+
+def test_modem_non_power_of_two_constellation():
+    """All constellation states must be reachable (no silent discard).
+
+    5 states -> n_bits = ceil(log2(5)) = 3; indices 0..4 valid,
+    indices 5..7 rejected as invalid input.
+    """
+    X, Y = _make_grid()
+    cfg = ModemConfig(
+        wavelength=1.55e-6,
+        grid_x=X,
+        grid_y=Y,
+        skyrmion_radius=1.0,
+        constellation=[-2, -1, 0, 1, 2],
+    )
+    modem = SkyrmionModem(cfg)
+    assert modem.n_bits == 3
+    assert modem.n_states == 5
+
+    # Every state reachable via its index bit string
+    for n_tx in modem.constellation:
+        bit_idx = modem.constellation.index(n_tx)
+        bits_tx = np.array(
+            [(bit_idx >> i) & 1 for i in range(modem.n_bits - 1, -1, -1)]
+        )
+        assert modem.bits_to_skyrmion(bits_tx) == n_tx
+        assert np.array_equal(modem.skyrmion_to_bits(n_tx), bits_tx)
+
+    # Unused indices (>= n_states) are invalid input
+    with pytest.raises(ValueError):
+        modem.bits_to_skyrmion(np.array([1, 1, 1]))  # index 7
+    with pytest.raises(ValueError):
+        modem.bits_to_skyrmion(np.array([1, 1, 0]))  # index 6
+
+    # Wrong group length and non-binary values are invalid input
+    with pytest.raises(ValueError):
+        modem.bits_to_skyrmion(np.array([0, 1]))  # incomplete final group
+    with pytest.raises(ValueError):
+        modem.bits_to_skyrmion(np.array([0, 1, 2]))  # not a bit
 
 
 # ----------------------------------------------------------------------
@@ -276,6 +340,167 @@ def test_ber_result_fields():
 
 
 # ----------------------------------------------------------------------
+# Regression tests for Phase III/IV/VI repairs
+# ----------------------------------------------------------------------
+
+
+def test_split_step_matches_direct_fresnel():
+    """Split-step propagation with cn2=0 must equal direct Fresnel
+    propagation over the *configured* distance (not 2x it), independent
+    of n_screens. Zero distance is the identity.
+
+    Regression for the split-step kernel bug where the Fresnel kernel
+    was applied at full dz in both half-steps, doubling the path.
+    """
+    from scipy.fft import fft2, ifft2, fftfreq
+
+    n = 64
+    x = np.linspace(-3, 3, n)
+    X, Y = np.meshgrid(x, x, indexing="xy")
+    dx = x[1] - x[0]
+    k = 2.0 * np.pi / 1.55e-6
+    kx = 2.0 * np.pi * fftfreq(n, dx)
+    KX, KY = np.meshgrid(kx, kx)
+    K2 = KX**2 + KY**2
+
+    def fresnel_direct(E, L):
+        return ifft2(fft2(E) * np.exp(-1j * K2 * L / (2.0 * k)))
+
+    E_in = np.exp(-(X**2 + Y**2) / 0.5**2).astype(np.complex128)
+
+    for L in [1.0, 10.0, 100.0, 1000.0]:
+        for n_screens in [1, 3, 10]:
+            cfg = TurbulenceConfig(
+                cn2=0.0, wavelength=1.55e-6, distance=L,
+                n_screens=n_screens, seed=1,
+            )
+            E_split = TurbulenceModel(cfg).propagate(E_in, X, Y)
+            err = float(np.max(np.abs(E_split - fresnel_direct(E_in, L))))
+            assert err < 1e-9, (
+                f"split-step != direct Fresnel at L={L}, n_screens={n_screens}: {err}"
+            )
+
+    # Zero distance -> identity
+    cfg = TurbulenceConfig(
+        cn2=0.0, wavelength=1.55e-6, distance=0.0, n_screens=5, seed=1
+    )
+    E0 = TurbulenceModel(cfg).propagate(E_in, X, Y)
+    assert float(np.max(np.abs(E0 - E_in))) < 1e-12
+
+
+class _WrongDemodModem(SkyrmionModem):
+    """Modem whose demodulate returns the next constellation value
+    cyclically (deterministic wrong decision) — exercises bit-vs-symbol
+    error counting independently of turbulence physics."""
+
+    def demodulate(self, Ex, Ey):
+        q, _ = super().demodulate(Ex, Ey)
+        n_rx = self._nearest_constellation(q)
+        idx = self.constellation.index(n_rx)
+        wrong = self.constellation[(idx + 1) % len(self.constellation)]
+        return float(wrong), wrong
+
+
+def test_ber_counting_bit_errors_independent_of_symbol_errors():
+    """BER and SER are distinct quantities.
+
+    4-state constellation [-2,-1,1,2] (2 bits/symbol). Deterministically
+    demodulate to the next constellation state cyclically:
+      idx0 [0,0]->idx1 [0,1]: 1 bit error
+      idx1 [0,1]->idx2 [1,0]: 2 bit errors
+      idx2 [1,0]->idx3 [1,1]: 1 bit error
+      idx3 [1,1]->idx0 [0,0]: 2 bit errors
+    Uniform symbols -> mean 1.5 bit errors / 2 bits => BER = 0.75,
+    SER = 1.0. If bit and symbol counting were conflated, BER would
+    incorrectly equal SER.
+    """
+    X, Y = _make_grid()
+    cfg = ModemConfig(
+        wavelength=1.55e-6, grid_x=X, grid_y=Y,
+        skyrmion_radius=1.0, constellation=[-2, -1, 1, 2],
+    )
+    sim = BERSimulator(grid_x=X, grid_y=Y, wavelength=1.55e-6, seed=42)
+    modem = _WrongDemodModem(cfg)
+    n_bits = modem.n_bits  # 2
+    n_errors = 0
+    n_symbol_errors = 0
+    n_symbols = 0
+    cfg_t = TurbulenceConfig(
+        cn2=0.0, wavelength=1.55e-6, distance=0.0, n_screens=3, seed=1
+    )  # distance 0: propagate is identity; this test checks counting, not physics
+    turb = TurbulenceModel(cfg_t)
+    # Each state modulates its own field; demodulate returns the next
+    # constellation state cyclically (deterministic wrong decision).
+    for n_tx in modem.constellation:
+        bit_idx = modem.constellation.index(n_tx)
+        bits_tx = np.array(
+            [(bit_idx >> i) & 1 for i in range(n_bits - 1, -1, -1)]
+        )
+        Ex_tx, Ey_tx, _ = modem.modulate(bits_tx, X, Y)
+        p_tx = float(np.sum(np.abs(Ex_tx) ** 2 + np.abs(Ey_tx) ** 2) * sim.dx * sim.dy)
+        scale = np.sqrt(1.0 / p_tx)
+        Ex_tx = Ex_tx * scale
+        Ey_tx = Ey_tx * scale
+        for _ in range(10):
+            E_rx = turb.propagate(Ex_tx, X, Y)
+            E_rx_y = turb.propagate(Ey_tx, X, Y)
+            q_measured, n_rx = modem.demodulate(E_rx, E_rx_y)
+            bits_rx = modem.skyrmion_to_bits(n_rx)
+            n_errors += int(np.sum(bits_tx != bits_rx))
+            n_symbol_errors += int(np.sum(bits_tx != bits_rx) > 0)
+            n_symbols += 1
+    assert n_symbols == 40
+    assert n_errors == 10 * (1 + 2 + 1 + 2)  # 60
+    assert n_symbol_errors == 40
+    ber = n_errors / (n_symbols * n_bits)
+    ser = n_symbol_errors / n_symbols
+    assert abs(ber - 0.75) < 1e-12
+    assert ser == 1.0
+    assert ber != ser  # BER and SER must NOT coincide
+
+
+def test_skm_joint_unit_total_power():
+    """The SKM two-component field normalizes to unit TOTAL power
+    (|Ex|^2 + |Ey|^2 integrated), matching scalar baselines — not
+    unit power per component (which would be 2x launch power), and not
+    the raw grid-pixel count (~4000x)."""
+    X, Y = _make_grid()
+    cfg = ModemConfig(
+        wavelength=1.55e-6, grid_x=X, grid_y=Y,
+        skyrmion_radius=1.0, constellation=[-2, -1, 0, 1, 2],
+    )
+    modem = SkyrmionModem(cfg)
+    Ex, Ey, _ = modem.modulate(np.array([0, 0, 0]), X, Y)
+    dx = X[0, 1] - X[0, 0]
+    dy = Y[1, 0] - Y[0, 0]
+    raw = float(np.sum(np.abs(Ex) ** 2 + np.abs(Ey) ** 2) * dx * dy)
+    assert raw > 10.0  # raw power really is the pixel-count scale
+    scale = np.sqrt(1.0 / raw)
+    total = float(np.sum(np.abs(Ex * scale) ** 2 + np.abs(Ey * scale) ** 2) * dx * dy)
+    assert abs(total - 1.0) < 1e-12
+
+
+def test_ber_ci_zero_errors_upper_bound_only():
+    """Zero observed errors yields BER=0 but a non-zero CI upper bound
+    (rule-of-three style): never claim true BER is exactly zero."""
+    X, Y = _make_grid()
+    sim = BERSimulator(grid_x=X, grid_y=Y, wavelength=1.55e-6, seed=42)
+    results = sim.run_skm_ber(
+        constellation=[-1, 1],
+        cn2_values=[0.0],
+        n_trials_per_config=20,
+        distance=100.0,
+        n_screens=3,
+        verbose=False,
+    )
+    for r in results:
+        assert r.ber == 0.0
+        assert r.n_errors == 0
+        assert r.ber_ci_lo == 0.0
+        assert 0.0 < r.ber_ci_hi < 1.0  # upper bound, not exact zero
+
+
+# ----------------------------------------------------------------------
 # Run all tests
 # ----------------------------------------------------------------------
 if __name__ == '__main__':
@@ -284,13 +509,18 @@ if __name__ == '__main__':
         test_turbulence_power_conservation,
         test_turbulence_phase_screen_amplitude,
         test_turbulence_rytov_variance,
+        test_split_step_matches_direct_fresnel,
         test_modem_constellation_bits,
         test_modem_modulate_demodulate_roundtrip,
         test_modem_bits_to_skyrmion_mapping,
         test_modem_skyrmion_to_bits_mapping,
+        test_modem_non_power_of_two_constellation,
         test_ber_simulator_initialization,
         test_ber_simulator_skm_zero_turbulence,
         test_ber_simulator_skm_weak_turbulence,
+        test_ber_counting_bit_errors_independent_of_symbol_errors,
+        test_skm_joint_unit_total_power,
+        test_ber_ci_zero_errors_upper_bound_only,
         test_ber_result_fields,
     ]
 

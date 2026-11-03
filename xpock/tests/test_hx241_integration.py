@@ -683,3 +683,122 @@ def test_hx241_integration_factory():
     assert isinstance(components["modulator"], WaveModulator)
     assert isinstance(components["impairment_modeler"], ImpairmentModeler)
     assert isinstance(components["signal_analyzer"], WaveSignalAnalyzer)
+
+
+# -----------------------------------------------------------------------
+# Phase V: end-to-end HX-241 channel simulation
+# -----------------------------------------------------------------------
+
+def test_end_to_end_channel_sequence():
+    """Real channel sequence, not a local round trip:
+
+        payload bits -> modulate -> wave event -> turbulence channel ->
+        receiver event -> reconstruction -> demodulate -> recovered payload
+
+    Measured per Cn²: payload integrity, BER (bit errors / total bits),
+    SER (symbol errors / total symbols), latency per symbol.
+
+    Only demodulation-recoverable dimensions are used (OAM charge,
+    temporal duration, beam waist); see _assignment_distance in
+    xpock/hx241/modulation/__init__.py for which dimensions the feature
+    demodulator can actually observe.
+    """
+    import time
+
+    import numpy as np
+
+    from xpock.core import WaveEvent, WaveField
+    from xpock.hx241.modulation import (
+        ModulationDimension,
+        ModulationScheme,
+        WaveModulator,
+        demodulate_wave_event,
+    )
+    from xpock.wave_info.turbulence import TurbulenceConfig, TurbulenceModel
+
+    x = np.linspace(-3, 3, 64)
+    y = np.linspace(-3, 3, 64)
+    t = np.linspace(-3, 3, 32)
+    grid = {"x": x, "y": y, "z": np.array([0.0]), "t": t}
+    X, Y = np.meshgrid(x, y, indexing="xy")
+
+    # Dimensions the feature demodulator can actually observe.
+    scheme = ModulationScheme()
+    scheme.add_dimension(ModulationDimension.OAM_CHARGE, [0, 1, 2, 3])
+    scheme.add_dimension(ModulationDimension.TEMPORAL_DURATION, [0.5, 1.0, 2.0])
+    scheme.add_dimension(ModulationDimension.BEAM_WAIST, [0.5, 1.0, 2.0])
+    capacity = scheme.capacity_bits()  # 2 + 1 + 1 = 4 bits/symbol
+    modulator = WaveModulator(scheme=scheme, grid_arrays=grid)
+
+    n_symbols = 20
+    results = []
+
+    for cn2 in [0.0, 1e-14, 1e-13]:
+        cfg = TurbulenceConfig(
+            wavelength=1.55e-6, distance=100.0, cn2=cn2, n_screens=5, seed=7
+        )
+        turb = TurbulenceModel(cfg)
+
+        bit_errors = 0
+        symbol_errors = 0
+        t0 = time.perf_counter()
+        for trial in range(n_symbols):
+            # --- Transmit: payload bits -> modulate -> wave event -------
+            mod_result = modulator.modulate_bits("1011")
+            idx_tx = modulator._constellation.index(
+                mod_result.dimension_assignments
+            )
+            bits_expected = format(idx_tx, f"0{capacity}b")
+
+            Ex_tx = mod_result.event.field.Ex[0, :, :, t.size // 2].copy()
+            Ey_tx = mod_result.event.field.Ey[0, :, :, t.size // 2].copy()
+
+            # --- Channel: physical propagation through turbulence -------
+            E_rx = turb.propagate(Ex_tx, X, Y)
+            E_rx_y = turb.propagate(Ey_tx, X, Y)
+
+            # --- Receiver: build event from observed field --------------
+            rx_field = WaveField(
+                Ex=E_rx[np.newaxis, :, :, np.newaxis],
+                Ey=E_rx_y[np.newaxis, :, :, np.newaxis],
+                x=x, y=y, z=grid["z"], t=np.array([0.0]),
+            )
+            rx_event = WaveEvent.create(
+                parameters={"channel_cn2": float(cn2), "trial": trial},
+                field=rx_field,
+            )
+
+            # --- Reconstruct: demodulate -> recovered payload -----------
+            demod_result = demodulate_wave_event(rx_event, scheme)
+            assert demod_result.demodulation_error is None
+            idx_rx = modulator._constellation.index(demod_result.recovered_dimensions)
+            bits_recovered = format(idx_rx, f"0{capacity}b")
+
+            bit_errors += int(
+                sum(b != r for b, r in zip(bits_expected, bits_recovered))
+            )
+            symbol_errors += int(bits_expected != bits_recovered)
+
+        elapsed = time.perf_counter() - t0
+        total_bits = n_symbols * capacity
+        ber = bit_errors / total_bits
+        ser = symbol_errors / n_symbols
+        results.append(
+            (cn2, ber, ser, bit_errors, symbol_errors, elapsed / n_symbols)
+        )
+        print(
+            f"E2E cn2={cn2}: BER={ber:.4f} ({bit_errors}/{total_bits}), "
+            f"SER={ser:.4f} ({symbol_errors}/{n_symbols}), "
+            f"{elapsed / n_symbols * 1000:.2f} ms/symbol"
+        )
+
+    # Noiseless channel must recover the payload exactly.
+    cn2, ber, ser, _, _, _ = results[0]
+    assert cn2 == 0.0
+    assert ber == 0.0, f"noiseless BER must be 0, got {ber}"
+    assert ser == 0.0, f"noiseless SER must be 0, got {ser}"
+
+    # BER/SER are reported quantities, always within [0, 1].
+    for cn2, ber, ser, *_ in results:
+        assert 0.0 <= ber <= 1.0
+        assert 0.0 <= ser <= 1.0

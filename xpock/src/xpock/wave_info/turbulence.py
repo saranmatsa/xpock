@@ -318,19 +318,26 @@ class TurbulenceModel:
         dz = self.cfg.distance / self.cfg.n_screens
         k = 2.0 * np.pi / self.cfg.wavelength
 
-        # Free-space propagation kernel (Fresnel approximation)
-        # H(kx, ky) = exp(-i * (kx² + ky²) * dz / (2*k))
+        # Free-space propagation kernel (Fresnel approximation).
+        # Each split-step applies TWO half-steps (before and after the
+        # screen), so each half-step kernel must use dz/2:
+        #   H_half = exp(-i * K2 * (dz/2) / (2*k))
+        # Two half-steps give exp(-i * K2 * dz / (2*k)) = Fresnel over dz,
+        # and n_screens steps sum to the configured total distance.
+        # BUG HISTORY: the kernel previously used dz for each half-step,
+        # applying Fresnel over 2*dz per step and 2*distance total — i.e.
+        # twice the configured propagation distance.
         kx_arr = 2.0 * np.pi * fftfreq(nx, d)
         ky_arr = 2.0 * np.pi * fftfreq(ny, d)
         KX, KY = np.meshgrid(kx_arr, ky_arr)
         K2 = KX**2 + KY**2
-        H = np.exp(-1j * K2 * dz / (2.0 * k))
+        H_half = np.exp(-1j * K2 * (dz / 2.0) / (2.0 * k))
 
         E = field.copy()
         for step in range(self.cfg.n_screens):
-            # Half-step free-space propagation
+            # First half-step free-space propagation (distance dz/2)
             E_hat = fft2(E)
-            E_hat = E_hat * H
+            E_hat = E_hat * H_half
             E = ifft2(E_hat)
 
             # Apply screens
@@ -355,9 +362,9 @@ class TurbulenceModel:
                     phi = self.generate_phase_screen((ny, nx), d, dz)
                 E = E * np.exp(1j * phi)
 
-            # Second half-step free-space propagation
+            # Second half-step free-space propagation (distance dz/2)
             E_hat = fft2(E)
-            E_hat = E_hat * H
+            E_hat = E_hat * H_half
             E = ifft2(E_hat)
 
         return E
